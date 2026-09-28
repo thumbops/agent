@@ -17,7 +17,7 @@ import (
 	"github.com/thumbops/agent/internal/protocol"
 )
 
-// startTLS avvia il backend finto in HTTPS con mTLS obbligatorio su /v1/agent/*.
+// startTLS starts the mock backend over HTTPS with mTLS required on /v1/agent/*.
 func startTLS(t *testing.T) (*mockbackend.Server, *httptest.Server, *x509.CertPool) {
 	t.Helper()
 	mb := mockbackend.New()
@@ -43,29 +43,29 @@ func TestRegistrationAndMTLS(t *testing.T) {
 	store := identity.Store{Dir: t.TempDir()}
 	c, holder := newClient(srv, roots)
 
-	// Prima della registrazione il backend rifiuta le chiamate dell'agente.
-	// Questa chiamata apre anche una connessione TLS senza certificato, che
-	// il client non deve più riusare dopo la registrazione.
+	// Before registration the backend rejects the agent's calls.
+	// This call also opens a TLS connection without a certificate, which
+	// the client must not reuse after registration.
 	if _, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{}); backend.Code(err) != http.StatusUnauthorized {
-		t.Fatalf("senza certificato atteso 401, ottenuto %v", err)
+		t.Fatalf("without a certificate expected 401, got %v", err)
 	}
 
 	if err := enroll.Register(context.Background(), c, store, holder, "bootstrap-test-token\n", info); err != nil {
 		t.Fatal(err)
 	}
 	if store.ClusterID() == "" {
-		t.Fatal("cluster_id non salvato")
+		t.Fatal("cluster_id not saved")
 	}
 	if cn := holder.Get().Leaf.Subject.CommonName; cn != store.ClusterID() {
-		t.Fatalf("CN del certificato %q diverso dal cluster_id %q", cn, store.ClusterID())
+		t.Fatalf("certificate CN %q differs from cluster_id %q", cn, store.ClusterID())
 	}
 	if _, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{AgentVersion: "0.1.0"}); err != nil {
-		t.Fatalf("heartbeat con mTLS dopo la registrazione: %v", err)
+		t.Fatalf("heartbeat with mTLS after registration: %v", err)
 	}
 
 	info, err := os.Stat(filepath.Join(store.Dir, "key.pem"))
 	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("permessi della chiave privata: %v %v", info.Mode(), err)
+		t.Fatalf("private key permissions: %v %v", info.Mode(), err)
 	}
 }
 
@@ -78,50 +78,50 @@ func TestBootstrapTokenIsSingleUse(t *testing.T) {
 	c2, h2 := newClient(srv, roots)
 	err := enroll.Register(context.Background(), c2, identity.Store{Dir: t.TempDir()}, h2, "bootstrap-test-token", info)
 	if backend.Code(err) != http.StatusUnauthorized {
-		t.Fatalf("secondo uso del token: atteso 401, ottenuto %v", err)
+		t.Fatalf("second use of the token: expected 401, got %v", err)
 	}
 }
 
-// Un certificato scaduto o firmato da una CA che il backend non riconosce
-// viene rifiutato durante l'handshake TLS, prima di qualunque risposta HTTP:
-// per l'agente deve valere come un 401.
+// A certificate that is expired or signed by a CA the backend does not know
+// is rejected during the TLS handshake, before any HTTP response: for the
+// agent it must count as a 401.
 func TestRejectedCertificateIsUnauthorized(t *testing.T) {
-	t.Run("scaduto", func(t *testing.T) {
+	t.Run("expired", func(t *testing.T) {
 		mb, srv, roots := startTLS(t)
-		mb.CertLifetime = -30 * time.Second // già scaduto all'emissione
+		mb.CertLifetime = -30 * time.Second // already expired when issued
 		c, holder := newClient(srv, roots)
 		if err := enroll.Register(context.Background(), c, identity.Store{Dir: t.TempDir()}, holder, "bootstrap-test-token", info); err != nil {
 			t.Fatal(err)
 		}
 		_, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{})
 		if !backend.Unauthorized(err) {
-			t.Fatalf("certificato scaduto: atteso rifiuto equivalente a 401, ottenuto %v", err)
+			t.Fatalf("expired certificate: expected a rejection equivalent to 401, got %v", err)
 		}
 	})
-	t.Run("CA sconosciuta", func(t *testing.T) {
+	t.Run("unknown CA", func(t *testing.T) {
 		_, srv1, roots1 := startTLS(t)
 		c1, holder := newClient(srv1, roots1)
 		if err := enroll.Register(context.Background(), c1, identity.Store{Dir: t.TempDir()}, holder, "bootstrap-test-token", info); err != nil {
 			t.Fatal(err)
 		}
-		// Stesso certificato client presentato a un backend con un'altra CA.
+		// Same client certificate presented to a backend with another CA.
 		_, srv2, roots2 := startTLS(t)
 		c2 := backend.New(backend.Options{BaseURL: srv2.URL, TLS: holder.ClientTLS(roots2)})
 		_, err := c2.Heartbeat(context.Background(), protocol.HeartbeatRequest{})
 		if !backend.Unauthorized(err) {
-			t.Fatalf("CA sconosciuta: atteso rifiuto equivalente a 401, ottenuto %v", err)
+			t.Fatalf("unknown CA: expected a rejection equivalent to 401, got %v", err)
 		}
 	})
-	t.Run("errori di rete e del server non contano", func(t *testing.T) {
+	t.Run("network and server errors do not count", func(t *testing.T) {
 		_, srv, roots := startTLS(t)
 		c, _ := newClient(srv, roots)
 		srv.Close()
 		_, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{})
 		if err == nil || backend.Unauthorized(err) {
-			t.Fatalf("backend irraggiungibile: atteso errore temporaneo, ottenuto %v", err)
+			t.Fatalf("backend unreachable: expected a temporary error, got %v", err)
 		}
 		if backend.Unauthorized(&backend.StatusError{Code: http.StatusServiceUnavailable}) {
-			t.Fatal("503 non è un rifiuto del certificato")
+			t.Fatal("503 is not a certificate rejection")
 		}
 	})
 }
@@ -137,7 +137,7 @@ func TestKeyIsReused(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !k1.Equal(k2) {
-		t.Fatal("la chiave esistente non è stata riletta")
+		t.Fatal("the existing key was not read back")
 	}
 }
 
@@ -153,26 +153,26 @@ func TestCertificateRenewal(t *testing.T) {
 
 	renewed, err := enroll.Renew(context.Background(), c, store, holder, time.Now())
 	if err != nil || renewed {
-		t.Fatalf("un certificato appena emesso non va rinnovato: %v %v", renewed, err)
+		t.Fatalf("a freshly issued certificate must not be renewed: %v %v", renewed, err)
 	}
 
-	later := first.NotAfter.Add(-time.Hour) // meno di un terzo della validità
+	later := first.NotAfter.Add(-time.Hour) // less than a third of the validity
 	renewed, err = enroll.Renew(context.Background(), c, store, holder, later)
 	if err != nil || !renewed {
-		t.Fatalf("rinnovo atteso: %v %v", renewed, err)
+		t.Fatalf("renewal expected: %v %v", renewed, err)
 	}
 	if holder.Get().Leaf.SerialNumber.Cmp(first.SerialNumber) == 0 {
-		t.Fatal("il certificato in uso non è cambiato")
+		t.Fatal("the certificate in use did not change")
 	}
 	if _, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{}); err != nil {
-		t.Fatalf("heartbeat con il certificato rinnovato: %v", err)
+		t.Fatalf("heartbeat with the renewed certificate: %v", err)
 	}
 	if mb.Renewals() != 1 {
-		t.Fatalf("rinnovi registrati dal backend: %d", mb.Renewals())
+		t.Fatalf("renewals recorded by the backend: %d", mb.Renewals())
 	}
-	// Il certificato rinnovato è anche quello salvato su disco.
+	// The renewed certificate is also the one saved on disk.
 	onDisk, err := store.Load()
 	if err != nil || onDisk.Leaf.SerialNumber.Cmp(holder.Get().Leaf.SerialNumber) != 0 {
-		t.Fatalf("certificato su disco non aggiornato: %v", err)
+		t.Fatalf("certificate on disk not updated: %v", err)
 	}
 }

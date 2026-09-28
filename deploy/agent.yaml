@@ -1,11 +1,11 @@
-# Installazione dell'agente ThumbOps (prototipo).
+# ThumbOps agent installation (prototype).
 #
 #   kubectl apply -f deploy/agent.yaml
-#   kubectl -n thumbops create secret generic thumbops-bootstrap --from-literal=token=<TOKEN MONOUSO>
+#   kubectl -n thumbops create secret generic thumbops-bootstrap --from-literal=token=<SINGLE-USE TOKEN>
 #
-# Il ClusterRole concede solo ciò che serve alle cinque azioni. Per installare
-# l'agente senza permessi di scrittura, rimuovere i verbi "patch" e "create"
-# e lasciare "allowed_actions" vuoto nella policy.
+# The ClusterRole grants only what the five actions need. To install the
+# agent without write permissions, remove the "patch" and "create" verbs
+# and leave "allowed_actions" empty in the policy.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -22,22 +22,22 @@ kind: ClusterRole
 metadata:
   name: thumbops-agent-actions
 rules:
-  # rollout-restart e scale
+  # rollout-restart and scale
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "patch"]
-  # cordon, uncordon, drain; lettura dei nodi per l'heartbeat
+  # cordon, uncordon, drain; reading nodes for the heartbeat
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "patch"]
-  # drain: elenco dei pod sul nodo ed eviction (rispetta i PodDisruptionBudget)
+  # drain: listing the pods on the node and eviction (honors PodDisruptionBudgets)
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]
-  # identificazione del cluster alla registrazione (UID di kube-system)
+  # cluster identification at registration (kube-system UID)
   - apiGroups: [""]
     resources: ["namespaces"]
     resourceNames: ["kube-system"]
@@ -56,8 +56,8 @@ subjects:
     name: thumbops-agent
     namespace: thumbops
 ---
-# Policy locale: la gestisce il team del cluster, non il backend.
-# Un'azione fuori policy viene rifiutata anche se approvata nell'app.
+# Local policy: managed by the cluster team, not by the backend.
+# An action outside the policy is rejected even if approved in the app.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -79,7 +79,7 @@ metadata:
   name: thumbops-agent
   namespace: thumbops
 spec:
-  replicas: 1 # un solo agente per cluster
+  replicas: 1 # a single agent per cluster
   strategy:
     type: Recreate
   selector:
@@ -99,7 +99,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: ghcr.io/thumbops/agent:0.1.0 # da sostituire con la propria immagine
+          image: ghcr.io/thumbops/agent:0.1.0 # replace with your own image
           args:
             - --backend-url=https://agent.thumbops.mobiletechnologies.cloud
             - --state-dir=/var/lib/thumbops
@@ -123,8 +123,8 @@ spec:
               mountPath: /etc/thumbops/bootstrap
               readOnly: true
       volumes:
-        # Prototipo: chiave e certificato su un PVC, così sopravvivono ai riavvii.
-        # In produzione andranno in un Secret gestito dall'agente.
+        # Prototype: key and certificate on a PVC, so they survive restarts.
+        # In production they will live in a Secret managed by the agent.
         - name: state
           persistentVolumeClaim:
             claimName: thumbops-agent-state
@@ -134,7 +134,7 @@ spec:
         - name: bootstrap
           secret:
             secretName: thumbops-bootstrap
-            optional: true # non serve più dopo la registrazione
+            optional: true # no longer needed after registration
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

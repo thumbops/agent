@@ -1,4 +1,4 @@
-// Package enroll gestisce registrazione e rinnovo del certificato dell'agente.
+// Package enroll handles registration and renewal of the agent certificate.
 package enroll
 
 import (
@@ -12,9 +12,9 @@ import (
 	"github.com/thumbops/agent/internal/protocol"
 )
 
-// Register completa la prima registrazione con il token di bootstrap:
-// genera la chiave, invia la CSR, salva il certificato e lo mette in uso.
-// info contiene i dati del cluster; il campo CSR viene compilato qui.
+// Register completes the first registration with the bootstrap token:
+// it generates the key, sends the CSR, saves the certificate and puts it in use.
+// info holds the cluster data; the CSR field is filled in here.
 func Register(ctx context.Context, b *backend.Client, store identity.Store, holder *identity.Holder, token string, info protocol.RegisterRequest) error {
 	key, err := store.LoadOrCreateKey()
 	if err != nil {
@@ -33,19 +33,19 @@ func Register(ctx context.Context, b *backend.Client, store identity.Store, hold
 	return Activate(b, store, holder)
 }
 
-// Activate carica il certificato salvato e lo mette in uso sulle nuove connessioni.
+// Activate loads the saved certificate and puts it in use on new connections.
 func Activate(b *backend.Client, store identity.Store, holder *identity.Holder) error {
 	cert, err := store.Load()
 	if err != nil {
-		return fmt.Errorf("certificato dell'agente: %w", err)
+		return fmt.Errorf("agent certificate: %w", err)
 	}
 	holder.Set(cert)
 	b.ResetConnections()
 	return nil
 }
 
-// Renew rinnova il certificato quando resta meno di un terzo della validità.
-// Restituisce true se ha rinnovato.
+// Renew renews the certificate when less than a third of its validity is left.
+// It returns true if it renewed.
 func Renew(ctx context.Context, b *backend.Client, store identity.Store, holder *identity.Holder, now time.Time) (bool, error) {
 	cur := holder.Get()
 	if cur == nil || cur.Leaf == nil || !identity.NeedsRenewal(cur.Leaf, now) {

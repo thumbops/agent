@@ -1,4 +1,4 @@
-// Package backend implementa il lato agente del protocollo agente–backend.
+// Package backend implements the agent side of the agent–backend protocol.
 package backend
 
 import (
@@ -19,17 +19,17 @@ import (
 	"github.com/thumbops/agent/internal/protocol"
 )
 
-// StatusError è una risposta HTTP non riuscita del backend.
+// StatusError is an unsuccessful HTTP response from the backend.
 type StatusError struct {
 	Code int
 	Body string
 }
 
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("backend ha risposto %d: %s", e.Code, e.Body)
+	return fmt.Sprintf("backend responded %d: %s", e.Code, e.Body)
 }
 
-// Code restituisce il codice HTTP di un errore del backend, o 0.
+// Code returns the HTTP status code of a backend error, or 0.
 func Code(err error) int {
 	var se *StatusError
 	if errors.As(err, &se) {
@@ -38,17 +38,17 @@ func Code(err error) int {
 	return 0
 }
 
-// Unauthorized dice se il backend non accetta più l'agente: risposta 401,
-// oppure certificato client rifiutato durante l'handshake TLS (scaduto,
-// revocato, firmato da una CA sconosciuta). Nel secondo caso non arriva
-// nessuna risposta HTTP, perché il server o il reverse proxy chiude prima.
+// Unauthorized reports whether the backend no longer accepts the agent: a 401
+// response, or a client certificate rejected during the TLS handshake
+// (expired, revoked, signed by an unknown CA). In the second case no HTTP
+// response arrives, because the server or reverse proxy closes first.
 func Unauthorized(err error) bool {
 	return Code(err) == http.StatusUnauthorized || certificateRejected(err)
 }
 
-// Alert TLS con cui un server rifiuta il certificato client, come li
-// formatta crypto/tls. Il tipo dell'alert non è esportato: si riconosce dal
-// testo, dentro un net.OpError con Op "remote error".
+// TLS alerts a server uses to reject the client certificate, as crypto/tls
+// formats them. The alert type is not exported, so it is recognized by its
+// text, inside a net.OpError with Op "remote error".
 var certificateAlerts = map[string]bool{
 	"tls: bad certificate":               true,
 	"tls: unsupported certificate":       true,
@@ -65,9 +65,9 @@ func certificateRejected(err error) bool {
 }
 
 type Options struct {
-	BaseURL   string      // es. https://agent.thumbops.mobiletechnologies.cloud
-	TLS       *tls.Config // certificato client (mTLS) e CA del server; nil = default
-	UserAgent string      // es. thumbops-agent/0.1.0
+	BaseURL   string      // e.g. https://agent.thumbops.mobiletechnologies.cloud
+	TLS       *tls.Config // client certificate (mTLS) and server CA; nil = default
+	UserAgent string      // e.g. thumbops-agent/0.1.0
 }
 
 type Client struct {
@@ -91,11 +91,11 @@ func (c *Client) newHTTPClient() *http.Client {
 	return &http.Client{Transport: tr}
 }
 
-// ResetConnections va chiamata quando cambia il certificato client (dopo la
-// registrazione o un rinnovo). Il certificato si presenta solo durante
-// l'handshake TLS: senza questo reset il client continuerebbe a riusare le
-// connessioni aperte con il certificato precedente, o senza certificato.
-// Le richieste in corso terminano sulla vecchia connessione.
+// ResetConnections must be called when the client certificate changes (after
+// registration or a renewal). The certificate is presented only during the
+// TLS handshake: without this reset the client would keep reusing the
+// connections opened with the previous certificate, or with none.
+// In-flight requests finish on the old connection.
 func (c *Client) ResetConnections() {
 	old := c.http.Swap(c.newHTTPClient())
 	old.CloseIdleConnections()
@@ -142,13 +142,13 @@ func (c *Client) do(ctx context.Context, method, path, bearer string, timeout ti
 	}
 	if out != nil && resp.StatusCode != http.StatusNoContent && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
-			return resp.StatusCode, fmt.Errorf("risposta del backend non valida: %w", err)
+			return resp.StatusCode, fmt.Errorf("invalid backend response: %w", err)
 		}
 	}
 	return resp.StatusCode, nil
 }
 
-// Register si autentica con il token di bootstrap monouso e ottiene il certificato.
+// Register authenticates with the single-use bootstrap token and obtains the certificate.
 func (c *Client) Register(ctx context.Context, bootstrapToken string, req protocol.RegisterRequest) (*protocol.RegisterResponse, error) {
 	var out protocol.RegisterResponse
 	if _, err := c.do(ctx, http.MethodPost, "/v1/register", bootstrapToken, defaultTimeout, req, &out); err != nil {
@@ -157,7 +157,7 @@ func (c *Client) Register(ctx context.Context, bootstrapToken string, req protoc
 	return &out, nil
 }
 
-// RenewCertificate invia una nuova CSR autenticandosi con il certificato ancora valido.
+// RenewCertificate sends a new CSR, authenticating with the still valid certificate.
 func (c *Client) RenewCertificate(ctx context.Context, csr string) (*protocol.CertificateResponse, error) {
 	var out protocol.CertificateResponse
 	if _, err := c.do(ctx, http.MethodPost, "/v1/agent/certificate", "", defaultTimeout, protocol.CertificateRequest{CSR: csr}, &out); err != nil {
@@ -174,7 +174,7 @@ func (c *Client) Heartbeat(ctx context.Context, req protocol.HeartbeatRequest) (
 	return &out, nil
 }
 
-// PollActions attende fino a wait secondi che ci sia un'azione (long polling).
+// PollActions waits up to wait seconds for an action (long polling).
 func (c *Client) PollActions(ctx context.Context, wait int) (*protocol.ActionsResponse, error) {
 	var out protocol.ActionsResponse
 	path := "/v1/agent/actions?wait=" + url.QueryEscape(fmt.Sprint(wait))
@@ -185,7 +185,7 @@ func (c *Client) PollActions(ctx context.Context, wait int) (*protocol.ActionsRe
 	return &out, nil
 }
 
-// Claim prende in carico un'azione: solo un claim riuscito autorizza l'esecuzione.
+// Claim takes ownership of an action: only a successful claim authorizes execution.
 func (c *Client) Claim(ctx context.Context, actionID string) error {
 	_, err := c.do(ctx, http.MethodPost, "/v1/agent/actions/"+url.PathEscape(actionID)+"/claim", "", defaultTimeout, nil, nil)
 	return err

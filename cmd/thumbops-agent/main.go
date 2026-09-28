@@ -1,4 +1,4 @@
-// Comando thumbops-agent: l'agente ThumbOps che gira in ogni cluster.
+// Command thumbops-agent: the ThumbOps agent that runs in every cluster.
 package main
 
 import (
@@ -23,23 +23,23 @@ import (
 	"github.com/thumbops/agent/internal/protocol"
 )
 
-// version viene impostata in build con -ldflags "-X main.version=..."
+// version is set at build time with -ldflags "-X main.version=..."
 var version = "0.1.0-dev"
 
 func main() {
 	var (
-		backendURL  = flag.String("backend-url", "https://agent.thumbops.mobiletechnologies.cloud", "URL del backend")
-		backendCA   = flag.String("backend-ca-file", "", "CA del server del backend (vuoto = CA di sistema)")
-		stateDir    = flag.String("state-dir", "/var/lib/thumbops", "cartella per chiave privata e certificato")
-		tokenFile   = flag.String("bootstrap-token-file", "/etc/thumbops/bootstrap/token", "token di bootstrap monouso per la prima registrazione")
-		policyFile  = flag.String("policy-file", "/etc/thumbops/policy/policy.json", "policy locale del cluster (JSON)")
-		devInsecure = flag.Bool("dev-insecure", false, "SOLO SVILUPPO: backend in HTTP, nessuna registrazione né mTLS")
-		kubeAPI     = flag.String("kube-api", "", "SOLO SVILUPPO: URL dell'API server fuori dal cluster")
-		kubeToken   = flag.String("kube-token", "", "SOLO SVILUPPO: token per --kube-api")
-		kubeCA      = flag.String("kube-ca-file", "", "SOLO SVILUPPO: CA per --kube-api")
+		backendURL  = flag.String("backend-url", "https://agent.thumbops.mobiletechnologies.cloud", "backend URL")
+		backendCA   = flag.String("backend-ca-file", "", "backend server CA (empty = system CAs)")
+		stateDir    = flag.String("state-dir", "/var/lib/thumbops", "directory for the private key and certificate")
+		tokenFile   = flag.String("bootstrap-token-file", "/etc/thumbops/bootstrap/token", "single-use bootstrap token for the first registration")
+		policyFile  = flag.String("policy-file", "/etc/thumbops/policy/policy.json", "cluster local policy (JSON)")
+		devInsecure = flag.Bool("dev-insecure", false, "DEVELOPMENT ONLY: backend over HTTP, no registration and no mTLS")
+		kubeAPI     = flag.String("kube-api", "", "DEVELOPMENT ONLY: API server URL when running outside the cluster")
+		kubeToken   = flag.String("kube-token", "", "DEVELOPMENT ONLY: token for --kube-api")
+		kubeCA      = flag.String("kube-ca-file", "", "DEVELOPMENT ONLY: CA for --kube-api")
 		logLevel    = flag.String("log-level", "info", "debug, info, warn, error")
-		showVersion = flag.Bool("version", false, "stampa la versione ed esce")
-		hbInterval  = flag.Duration("heartbeat-interval", 60*time.Second, "intervallo tra gli heartbeat")
+		showVersion = flag.Bool("version", false, "print the version and exit")
+		hbInterval  = flag.Duration("heartbeat-interval", 60*time.Second, "interval between heartbeats")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -49,7 +49,7 @@ func main() {
 
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(*logLevel)); err != nil {
-		fatal("livello di log non valido: %v", err)
+		fatal("invalid log level: %v", err)
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 	slog.SetDefault(log)
@@ -61,12 +61,12 @@ func main() {
 	if *kubeAPI == "" {
 		var err error
 		if kcfg, err = kube.InClusterConfig(); err != nil {
-			fatal("%v (fuori dal cluster usare --kube-api)", err)
+			fatal("%v (outside the cluster use --kube-api)", err)
 		}
 	}
 	k, err := kube.New(kcfg)
 	if err != nil {
-		fatal("client Kubernetes: %v", err)
+		fatal("Kubernetes client: %v", err)
 	}
 
 	pol, err := policy.Load(*policyFile)
@@ -74,7 +74,7 @@ func main() {
 		fatal("%v", err)
 	}
 	if len(pol.AllowedActions) == 0 {
-		log.Warn("policy locale assente o vuota: tutte le azioni verranno rifiutate", "policy_file", *policyFile)
+		log.Warn("local policy missing or empty: every action will be rejected", "policy_file", *policyFile)
 	}
 
 	userAgent := "thumbops-agent/" + version
@@ -82,21 +82,21 @@ func main() {
 
 	var b *backend.Client
 	if *devInsecure {
-		log.Warn("modalità di sviluppo: nessuna autenticazione verso il backend")
+		log.Warn("development mode: no authentication to the backend")
 		b = backend.New(backend.Options{BaseURL: *backendURL, UserAgent: userAgent})
 	} else {
 		if !strings.HasPrefix(*backendURL, "https://") {
-			fatal("il backend deve essere raggiungibile in HTTPS (per lo sviluppo: --dev-insecure)")
+			fatal("the backend must be reached over HTTPS (for development: --dev-insecure)")
 		}
 		var roots *x509.CertPool
 		if *backendCA != "" {
 			pem, err := os.ReadFile(*backendCA)
 			if err != nil {
-				fatal("lettura CA del backend: %v", err)
+				fatal("reading the backend CA: %v", err)
 			}
 			roots = x509.NewCertPool()
 			if !roots.AppendCertsFromPEM(pem) {
-				fatal("nessun certificato valido in %s", *backendCA)
+				fatal("no valid certificate in %s", *backendCA)
 			}
 		}
 		store := identity.Store{Dir: *stateDir}
@@ -109,40 +109,40 @@ func main() {
 			}
 		} else {
 			if err := register(ctx, b, k, store, holder, *tokenFile); err != nil {
-				fatal("registrazione non riuscita: %v", err)
+				fatal("registration failed: %v", err)
 			}
-			log.Info("agente registrato", "cluster_id", store.ClusterID())
+			log.Info("agent registered", "cluster_id", store.ClusterID())
 		}
 		cfg.Renew = func(ctx context.Context) error {
 			renewed, err := enroll.Renew(ctx, b, store, holder, time.Now())
 			if renewed {
-				log.Info("certificato rinnovato", "expires", holder.Get().Leaf.NotAfter)
+				log.Info("certificate renewed", "expires", holder.Get().Leaf.NotAfter)
 			}
 			return err
 		}
-		log.Info("identità caricata", "cluster_id", store.ClusterID(), "certificate_expires", holder.Get().Leaf.NotAfter)
+		log.Info("identity loaded", "cluster_id", store.ClusterID(), "certificate_expires", holder.Get().Leaf.NotAfter)
 	}
 
 	a := agent.New(cfg, b, k, actions.New(k), pol)
-	log.Info("agente avviato", "version", version, "backend", *backendURL)
+	log.Info("agent started", "version", version, "backend", *backendURL)
 	if err := a.Run(ctx); err != nil {
 		fatal("%v", err)
 	}
-	log.Info("agente arrestato")
+	log.Info("agent stopped")
 }
 
 func register(ctx context.Context, b *backend.Client, k *kube.Client, store identity.Store, holder *identity.Holder, tokenFile string) error {
 	token, err := os.ReadFile(tokenFile)
 	if err != nil {
-		return fmt.Errorf("token di bootstrap non leggibile: %w", err)
+		return fmt.Errorf("cannot read the bootstrap token: %w", err)
 	}
 	ver, err := k.ServerVersion(ctx)
 	if err != nil {
-		return fmt.Errorf("versione di Kubernetes: %w", err)
+		return fmt.Errorf("Kubernetes version: %w", err)
 	}
 	uid, err := k.NamespaceUID(ctx, "kube-system")
 	if err != nil {
-		return fmt.Errorf("UID di kube-system: %w", err)
+		return fmt.Errorf("kube-system UID: %w", err)
 	}
 	return enroll.Register(ctx, b, store, holder, string(token), protocol.RegisterRequest{
 		AgentVersion: version, KubernetesVersion: ver, ClusterUID: uid,
