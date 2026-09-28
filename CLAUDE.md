@@ -1,8 +1,17 @@
 # ThumbOps agent
 
 Agente Go che gira in ogni cluster: riceve dal backend le azioni approvate e le
-esegue entro la policy locale del cluster. Contesto generale in `../CLAUDE.md`,
-protocollo in `../docs/protocollo.md`.
+esegue entro la policy locale del cluster. Repository pubblico `thumbops/agent`
+(Apache 2.0).
+
+Il protocollo agente–backend è in `../spec/protocol/protocollo.md`
+(repository `thumbops/spec`), unica fonte di verità: se lo cambi, cambialo lì.
+Il contesto generale del progetto è in `../platform/CLAUDE.md`, se presente sul
+disco (repository privato). Non copiare in questo repository materiale interno
+(modello di business, piani, marchio).
+
+Non eseguire mai l'agente o prove con kubectl su cluster reali senza una
+richiesta esplicita dell'utente: usa kind o l'API simulata.
 
 ## Comandi
 
@@ -69,7 +78,7 @@ Ognuna è coperta da test; se un cambiamento li fa fallire, fermati e capisci pe
 ## Prossimi passi
 
 1. Prova su kind con il backend finto; poi con il token del ServiceAccount per verificare l'RBAC reale.
-2. Stato del cluster: `PUT /v1/agent/status` ogni 60 s e su `status_requested`, con informer; formato e limiti in `../docs/protocollo.md` (sezione "Stato del cluster"). Rispettare `status.exclude_namespaces` della policy. ClusterRole separato in sola lettura.
+2. Stato del cluster: `PUT /v1/agent/status` ogni 60 s e su `status_requested`, con informer; formato e limiti in `../spec/protocol/protocollo.md` (sezione "Stato del cluster"). Rispettare `status.exclude_namespaces` della policy. ClusterRole separato in sola lettura.
 3. Chiave e certificato in un Secret gestito dall'agente invece che su PVC.
 4. Helm chart (sostituisce `deploy/agent.yaml`), probe di liveness/readiness, metriche Prometheus.
 5. CI (GitHub Actions): `go test -race`, `go vet`, `gofmt`, test end-to-end su kind; build dell'immagine.
