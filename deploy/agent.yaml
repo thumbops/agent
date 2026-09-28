@@ -1,0 +1,148 @@
+# Installazione dell'agente ThumbOps (prototipo).
+#
+#   kubectl apply -f deploy/agent.yaml
+#   kubectl -n thumbops create secret generic thumbops-bootstrap --from-literal=token=<TOKEN MONOUSO>
+#
+# Il ClusterRole concede solo ciò che serve alle cinque azioni. Per installare
+# l'agente senza permessi di scrittura, rimuovere i verbi "patch" e "create"
+# e lasciare "allowed_actions" vuoto nella policy.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: thumbops
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: thumbops-agent
+  namespace: thumbops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: thumbops-agent-actions
+rules:
+  # rollout-restart e scale
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  # cordon, uncordon, drain; lettura dei nodi per l'heartbeat
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+  # drain: elenco dei pod sul nodo ed eviction (rispetta i PodDisruptionBudget)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  # identificazione del cluster alla registrazione (UID di kube-system)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["kube-system"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: thumbops-agent-actions
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: thumbops-agent-actions
+subjects:
+  - kind: ServiceAccount
+    name: thumbops-agent
+    namespace: thumbops
+---
+# Policy locale: la gestisce il team del cluster, non il backend.
+# Un'azione fuori policy viene rifiutata anche se approvata nell'app.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: thumbops-policy
+  namespace: thumbops
+data:
+  policy.json: |
+    {
+      "allowed_actions": ["rollout-restart", "scale", "cordon", "uncordon", "drain"],
+      "denied_namespaces": ["kube-system", "thumbops"],
+      "max_replicas": 20,
+      "allow_delete_emptydir_data": false,
+      "allow_control_plane_nodes": false
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thumbops-agent
+  namespace: thumbops
+spec:
+  replicas: 1 # un solo agente per cluster
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: thumbops-agent
+  template:
+    metadata:
+      labels:
+        app: thumbops-agent
+    spec:
+      serviceAccountName: thumbops-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: ghcr.io/thumbops/agent:0.1.0 # da sostituire con la propria immagine
+          args:
+            - --backend-url=https://agent.thumbops.mobiletechnologies.cloud
+            - --state-dir=/var/lib/thumbops
+            - --policy-file=/etc/thumbops/policy/policy.json
+            - --bootstrap-token-file=/etc/thumbops/bootstrap/token
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/thumbops
+            - name: policy
+              mountPath: /etc/thumbops/policy
+              readOnly: true
+            - name: bootstrap
+              mountPath: /etc/thumbops/bootstrap
+              readOnly: true
+      volumes:
+        # Prototipo: chiave e certificato su un PVC, così sopravvivono ai riavvii.
+        # In produzione andranno in un Secret gestito dall'agente.
+        - name: state
+          persistentVolumeClaim:
+            claimName: thumbops-agent-state
+        - name: policy
+          configMap:
+            name: thumbops-policy
+        - name: bootstrap
+          secret:
+            secretName: thumbops-bootstrap
+            optional: true # non serve più dopo la registrazione
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: thumbops-agent-state
+  namespace: thumbops
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Mi

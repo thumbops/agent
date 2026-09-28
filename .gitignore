@@ -1,0 +1,7 @@
+/thumbops-agent
+/mock-backend
+*.test
+*.out
+coverage*
+/dist/
+.DS_Store
