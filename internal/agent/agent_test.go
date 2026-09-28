@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"io"
 	"log/slog"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/thumbops/agent/internal/actions"
 	"github.com/thumbops/agent/internal/backend"
+	"github.com/thumbops/agent/internal/enroll"
+	"github.com/thumbops/agent/internal/identity"
 	"github.com/thumbops/agent/internal/kubefake"
 	"github.com/thumbops/agent/internal/mockbackend"
 	"github.com/thumbops/agent/internal/policy"
@@ -240,6 +243,50 @@ func TestUnauthorizedStopsAgent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("con 401 l'agente deve fermarsi")
+	}
+}
+
+// Un certificato scaduto viene rifiutato all'handshake TLS, senza nessun 401:
+// l'agente deve fermarsi come per un 401, non ritentare all'infinito.
+func TestExpiredCertificateStopsAgent(t *testing.T) {
+	mb := mockbackend.New()
+	mb.RequireMTLS = true
+	mb.CertLifetime = -30 * time.Second // già scaduto all'emissione
+	srv := httptest.NewUnstartedServer(mb.Handler())
+	srv.TLS = mb.TLSConfig()
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	holder := &identity.Holder{}
+	b := backend.New(backend.Options{BaseURL: srv.URL, TLS: holder.ClientTLS(roots)})
+	if err := enroll.Register(context.Background(), b, identity.Store{Dir: t.TempDir()}, holder, "bootstrap-test-token", protocol.RegisterRequest{}); err != nil {
+		t.Fatal(err)
+	}
+
+	fk := kubefake.New()
+	t.Cleanup(fk.Close)
+	k := fk.Client()
+	a := New(Config{
+		Version:           "0.1.0-test",
+		HeartbeatInterval: 50 * time.Millisecond,
+		InitialBackoff:    5 * time.Millisecond,
+		MaxBackoff:        20 * time.Millisecond,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}, b, k, actions.New(k), &policy.Policy{})
+
+	done := make(chan error, 1)
+	go func() { done <- a.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("atteso ErrUnauthorized, ottenuto %v", err)
+		}
+		if !strings.Contains(err.Error(), "expired certificate") {
+			t.Fatalf("l'errore deve indicare la causa: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("con il certificato scaduto l'agente deve fermarsi")
 	}
 }
 

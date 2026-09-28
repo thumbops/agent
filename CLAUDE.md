@@ -74,6 +74,9 @@ Ognuna è coperta da test; se un cambiamento li fa fallire, fermati e capisci pe
   certificato client si presenta solo all'handshake e il long polling tiene la
   connessione sempre attiva. Questo bug è già stato trovato una volta.
 - **`401` ferma l'agente** (`ErrUnauthorized`); `426` lo lascia in sola modalità heartbeat.
+  Un certificato scaduto o rifiutato non produce un `401` ma un alert TLS
+  all'handshake: `backend.Unauthorized` tratta i due casi allo stesso modo,
+  altrimenti l'agente ritenterebbe all'infinito. Anche questo è stato visto su kind.
 
 ## Prossimi passi
 

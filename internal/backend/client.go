@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,6 +36,32 @@ func Code(err error) int {
 		return se.Code
 	}
 	return 0
+}
+
+// Unauthorized dice se il backend non accetta più l'agente: risposta 401,
+// oppure certificato client rifiutato durante l'handshake TLS (scaduto,
+// revocato, firmato da una CA sconosciuta). Nel secondo caso non arriva
+// nessuna risposta HTTP, perché il server o il reverse proxy chiude prima.
+func Unauthorized(err error) bool {
+	return Code(err) == http.StatusUnauthorized || certificateRejected(err)
+}
+
+// Alert TLS con cui un server rifiuta il certificato client, come li
+// formatta crypto/tls. Il tipo dell'alert non è esportato: si riconosce dal
+// testo, dentro un net.OpError con Op "remote error".
+var certificateAlerts = map[string]bool{
+	"tls: bad certificate":               true,
+	"tls: unsupported certificate":       true,
+	"tls: revoked certificate":           true,
+	"tls: expired certificate":           true,
+	"tls: unknown certificate":           true,
+	"tls: unknown certificate authority": true,
+	"tls: certificate required":          true,
+}
+
+func certificateRejected(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "remote error" && op.Err != nil && certificateAlerts[op.Err.Error()]
 }
 
 type Options struct {
