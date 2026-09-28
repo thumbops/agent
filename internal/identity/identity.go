@@ -1,6 +1,6 @@
-// Package identity gestisce la chiave privata e il certificato con cui
-// l'agente si autentica al backend (mTLS). La chiave viene generata qui e non
-// lascia mai il cluster: al backend arriva solo una CSR.
+// Package identity manages the private key and the certificate the agent
+// uses to authenticate to the backend (mTLS). The key is generated here and
+// never leaves the cluster: the backend only receives a CSR.
 package identity
 
 import (
@@ -26,29 +26,29 @@ const (
 	clusterIDFile = "cluster_id"
 )
 
-// Store conserva identità e certificato in una cartella.
-// Nel prototipo è un volume; in produzione sarà un Secret (vedi README).
+// Store keeps the identity and certificate in a directory.
+// In the prototype it is a volume; in production it will be a Secret (see README).
 type Store struct {
 	Dir string
 }
 
 func (s Store) path(name string) string { return filepath.Join(s.Dir, name) }
 
-// LoadOrCreateKey legge la chiave Ed25519 o ne genera una nuova.
+// LoadOrCreateKey reads the Ed25519 key or generates a new one.
 func (s Store) LoadOrCreateKey() (ed25519.PrivateKey, error) {
 	data, err := os.ReadFile(s.path(keyFile))
 	if err == nil {
 		block, _ := pem.Decode(data)
 		if block == nil {
-			return nil, errors.New("chiave privata non leggibile")
+			return nil, errors.New("cannot read the private key")
 		}
 		k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("chiave privata non valida: %w", err)
+			return nil, fmt.Errorf("invalid private key: %w", err)
 		}
 		key, ok := k.(ed25519.PrivateKey)
 		if !ok {
-			return nil, errors.New("la chiave privata non è Ed25519")
+			return nil, errors.New("the private key is not Ed25519")
 		}
 		return key, nil
 	}
@@ -73,8 +73,8 @@ func (s Store) LoadOrCreateKey() (ed25519.PrivateKey, error) {
 	return key, nil
 }
 
-// CSR crea una richiesta di firma. Il backend ignora il soggetto e usa
-// il cluster_id come CN del certificato.
+// CSR creates a signing request. The backend ignores the subject and uses
+// the cluster_id as the certificate CN.
 func CSR(key ed25519.PrivateKey) (string, error) {
 	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
 		Subject: pkix.Name{CommonName: "thumbops-agent"},
@@ -85,13 +85,13 @@ func CSR(key ed25519.PrivateKey) (string, error) {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})), nil
 }
 
-// Registered indica se esiste già un certificato.
+// Registered reports whether a certificate already exists.
 func (s Store) Registered() bool {
 	_, err := os.Stat(s.path(certFile))
 	return err == nil
 }
 
-// Save salva il certificato; caPEM e clusterID vengono scritti solo se non vuoti.
+// Save stores the certificate; caPEM and clusterID are written only if not empty.
 func (s Store) Save(certPEM, caPEM, clusterID string) error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
@@ -125,7 +125,7 @@ func (s Store) ClusterID() string {
 	return strings.TrimSpace(string(b))
 }
 
-// Load restituisce certificato e chiave pronti per tls.
+// Load returns the certificate and key ready for tls.
 func (s Store) Load() (*tls.Certificate, error) {
 	certPEM, err := os.ReadFile(s.path(certFile))
 	if err != nil {
@@ -137,7 +137,7 @@ func (s Store) Load() (*tls.Certificate, error) {
 	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return nil, fmt.Errorf("certificato e chiave non corrispondono: %w", err)
+		return nil, fmt.Errorf("certificate and key do not match: %w", err)
 	}
 	if cert.Leaf == nil {
 		leaf, err := x509.ParseCertificate(cert.Certificate[0])
@@ -149,14 +149,14 @@ func (s Store) Load() (*tls.Certificate, error) {
 	return &cert, nil
 }
 
-// NeedsRenewal è vero quando resta meno di un terzo della validità.
+// NeedsRenewal is true when less than a third of the validity is left.
 func NeedsRenewal(leaf *x509.Certificate, now time.Time) bool {
 	total := leaf.NotAfter.Sub(leaf.NotBefore)
 	return leaf.NotAfter.Sub(now) < total/3
 }
 
-// Holder tiene il certificato corrente e permette di sostituirlo
-// dopo un rinnovo senza ricreare le connessioni.
+// Holder keeps the current certificate and lets it be replaced after a
+// renewal without recreating the TLS configuration.
 type Holder struct {
 	mu   sync.RWMutex
 	cert *tls.Certificate
@@ -174,8 +174,8 @@ func (h *Holder) Get() *tls.Certificate {
 	return h.cert
 }
 
-// ClientTLS restituisce una configurazione TLS che presenta sempre
-// il certificato corrente. roots nil = CA di sistema.
+// ClientTLS returns a TLS configuration that always presents the current
+// certificate. nil roots = system CAs.
 func (h *Holder) ClientTLS(roots *x509.CertPool) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,

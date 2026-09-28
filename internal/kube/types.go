@@ -2,7 +2,7 @@ package kube
 
 import "encoding/json"
 
-// Solo i campi usati dall'agente: il resto degli oggetti viene ignorato.
+// Only the fields the agent uses: the rest of each object is ignored.
 
 type ObjectMeta struct {
 	Name            string            `json:"name"`
@@ -60,7 +60,7 @@ type NodeCondition struct {
 	Status string `json:"status"`
 }
 
-// Ready indica se il nodo ha la condizione Ready=True.
+// Ready reports whether the node has the condition Ready=True.
 func (n *Node) Ready() bool {
 	for _, c := range n.Status.Conditions {
 		if c.Type == "Ready" {
@@ -90,7 +90,7 @@ type PodStatus struct {
 	Phase string `json:"phase,omitempty"`
 }
 
-// ControllerRef restituisce il riferimento al controller del pod, se esiste.
+// ControllerRef returns the reference to the pod's controller, if any.
 func (p *Pod) ControllerRef() *OwnerReference {
 	for i, o := range p.Metadata.OwnerReferences {
 		if o.Controller != nil && *o.Controller {

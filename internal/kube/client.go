@@ -1,5 +1,5 @@
-// Package kube è un client minimo per l'API REST di Kubernetes, scritto con la
-// sola libreria standard. Copre esclusivamente le chiamate che servono all'agente.
+// Package kube is a minimal client for the Kubernetes REST API, written with the
+// standard library only. It covers only the calls the agent needs.
 package kube
 
 import (
@@ -21,20 +21,20 @@ import (
 
 const serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 
-// Config descrive come raggiungere l'API server.
+// Config describes how to reach the API server.
 type Config struct {
-	Host      string // es. https://10.96.0.1:443
-	Token     string // token statico (solo per sviluppo fuori dal cluster)
-	TokenFile string // token del ServiceAccount, riletto a ogni richiesta perché ruota
+	Host      string // e.g. https://10.96.0.1:443
+	Token     string // static token (only for development outside the cluster)
+	TokenFile string // ServiceAccount token, re-read on every request because it rotates
 	CAFile    string
 	Timeout   time.Duration
 }
 
-// InClusterConfig legge la configurazione standard di un pod.
+// InClusterConfig reads the standard configuration of a pod.
 func InClusterConfig() (Config, error) {
 	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
 	if host == "" || port == "" {
-		return Config{}, errors.New("non in esecuzione in un cluster: KUBERNETES_SERVICE_HOST/PORT assenti")
+		return Config{}, errors.New("not running in a cluster: KUBERNETES_SERVICE_HOST/PORT not set")
 	}
 	return Config{
 		Host:      "https://" + net.JoinHostPort(host, port),
@@ -43,7 +43,7 @@ func InClusterConfig() (Config, error) {
 	}, nil
 }
 
-// Client parla con l'API server.
+// Client talks to the API server.
 type Client struct {
 	host string
 	cfg  Config
@@ -52,18 +52,18 @@ type Client struct {
 
 func New(cfg Config) (*Client, error) {
 	if cfg.Host == "" {
-		return nil, errors.New("host dell'API server mancante")
+		return nil, errors.New("missing API server host")
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.Proxy = nil // l'API server si raggiunge direttamente, mai tramite proxy
+	tr.Proxy = nil // the API server is reached directly, never through a proxy
 	if cfg.CAFile != "" {
 		pem, err := os.ReadFile(cfg.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("lettura CA dell'API server: %w", err)
+			return nil, fmt.Errorf("reading the API server CA: %w", err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("nessun certificato valido nella CA dell'API server")
+			return nil, errors.New("no valid certificate in the API server CA")
 		}
 		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
@@ -74,7 +74,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{host: strings.TrimRight(cfg.Host, "/"), cfg: cfg, http: &http.Client{Transport: tr, Timeout: timeout}}, nil
 }
 
-// APIError è un errore restituito dall'API server.
+// APIError is an error returned by the API server.
 type APIError struct {
 	Code    int
 	Reason  string
@@ -101,7 +101,7 @@ func (c *Client) token() (string, error) {
 	if c.cfg.TokenFile != "" {
 		b, err := os.ReadFile(c.cfg.TokenFile)
 		if err != nil {
-			return "", fmt.Errorf("lettura token del ServiceAccount: %w", err)
+			return "", fmt.Errorf("reading the ServiceAccount token: %w", err)
 		}
 		return strings.TrimSpace(string(b)), nil
 	}
@@ -177,7 +177,7 @@ func (c *Client) GetDeployment(ctx context.Context, ns, name string) (*Deploymen
 	return &d, nil
 }
 
-// PatchDeployment applica una JSON merge patch.
+// PatchDeployment applies a JSON merge patch.
 func (c *Client) PatchDeployment(ctx context.Context, ns, name string, patch any) (*Deployment, error) {
 	var d Deployment
 	if err := c.do(ctx, http.MethodPatch, deploymentPath(ns, name), contentMergePatch, patch, &d); err != nil {
@@ -232,8 +232,8 @@ func (c *Client) GetPod(ctx context.Context, ns, name string) (*Pod, error) {
 	return &p, nil
 }
 
-// EvictPod usa l'Eviction API, che rispetta i PodDisruptionBudget
-// (l'API server risponde 429 se l'eviction violerebbe un PDB).
+// EvictPod uses the Eviction API, which honors PodDisruptionBudgets
+// (the API server responds 429 if the eviction would violate a PDB).
 func (c *Client) EvictPod(ctx context.Context, ns, name string) error {
 	body := map[string]any{
 		"apiVersion": "policy/v1",
@@ -244,7 +244,7 @@ func (c *Client) EvictPod(ctx context.Context, ns, name string) error {
 	return c.do(ctx, http.MethodPost, path, contentJSON, body, nil)
 }
 
-// ResourceAttributes descrive un permesso da verificare.
+// ResourceAttributes describes a permission to check.
 type ResourceAttributes struct {
 	Verb        string `json:"verb"`
 	Group       string `json:"group"`
@@ -253,7 +253,7 @@ type ResourceAttributes struct {
 	Namespace   string `json:"namespace,omitempty"`
 }
 
-// CanI verifica un permesso dell'agente con una SelfSubjectAccessReview.
+// CanI checks one of the agent's permissions with a SelfSubjectAccessReview.
 func (c *Client) CanI(ctx context.Context, attrs ResourceAttributes) (bool, error) {
 	body := map[string]any{
 		"apiVersion": "authorization.k8s.io/v1",
@@ -281,8 +281,8 @@ func (c *Client) ServerVersion(ctx context.Context) (string, error) {
 	return v.GitVersion, nil
 }
 
-// NamespaceUID restituisce l'UID di un namespace: quello di kube-system
-// identifica il cluster anche se l'agente viene reinstallato.
+// NamespaceUID returns the UID of a namespace: the kube-system one
+// identifies the cluster even if the agent is reinstalled.
 func (c *Client) NamespaceUID(ctx context.Context, name string) (string, error) {
 	var ns struct {
 		Metadata ObjectMeta `json:"metadata"`

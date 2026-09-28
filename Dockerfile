@@ -1,4 +1,4 @@
-# Immagine minima: binario statico su distroless, utente non root.
+# Minimal image: static binary on distroless, non-root user.
 FROM golang:1.24 AS build
 WORKDIR /src
 COPY go.mod ./

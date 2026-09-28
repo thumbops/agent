@@ -1,17 +1,17 @@
-// Comando mock-backend: un backend finto per provare l'agente in locale,
-// ad esempio con un cluster kind. Solo per lo sviluppo.
+// Command mock-backend: a fake backend for trying the agent locally,
+// for example with a kind cluster. Development only.
 //
-// In HTTP non c'è autenticazione (agente con --dev-insecure):
+// Over HTTP there is no authentication (agent with --dev-insecure):
 //
 //	go run ./cmd/mock-backend -addr :8080
 //	curl -X POST localhost:8080/debug/actions -d '{"type":"scale","params":{"namespace":"demo","deployment":"web","replicas":3}}'
 //	curl localhost:8080/debug/actions
 //
-// Con -tls-cert e -tls-key serve HTTPS come il backend reale: registrazione
-// con token di bootstrap monouso, mTLS obbligatorio su /v1/agent/* e rinnovo
-// del certificato (-cert-lifetime corto per vederlo scattare). La CA dei
-// certificati client viene generata a ogni avvio: dopo un riavvio l'agente
-// va registrato di nuovo, con uno state-dir vuoto.
+// With -tls-cert and -tls-key it serves HTTPS like the real backend:
+// registration with a single-use bootstrap token, mTLS required on
+// /v1/agent/* and certificate renewal (use a short -cert-lifetime to see it
+// happen). The client certificate CA is generated at every start: after a
+// restart the agent must register again, with an empty state-dir.
 //
 //	go run ./cmd/mock-backend -addr 127.0.0.1:8443 -tls-cert server.crt -tls-key server.key -cert-lifetime 2m
 //	curl --cacert server.crt https://127.0.0.1:8443/debug/actions
@@ -28,15 +28,15 @@ import (
 
 func main() {
 	var (
-		addr     = flag.String("addr", ":8080", "indirizzo di ascolto")
-		certFile = flag.String("tls-cert", "", "certificato del server (PEM): abilita HTTPS e mTLS")
-		keyFile  = flag.String("tls-key", "", "chiave privata del certificato del server (PEM)")
-		token    = flag.String("bootstrap-token", "", "token di bootstrap monouso (vuoto = predefinito del backend finto)")
-		lifetime = flag.Duration("cert-lifetime", 0, "validità dei certificati emessi all'agente (0 = predefinita, 30 giorni)")
+		addr     = flag.String("addr", ":8080", "listen address")
+		certFile = flag.String("tls-cert", "", "server certificate (PEM): enables HTTPS and mTLS")
+		keyFile  = flag.String("tls-key", "", "server certificate private key (PEM)")
+		token    = flag.String("bootstrap-token", "", "single-use bootstrap token (empty = the mock backend default)")
+		lifetime = flag.Duration("cert-lifetime", 0, "validity of the certificates issued to the agent (0 = default, 30 days)")
 	)
 	flag.Parse()
 	if (*certFile == "") != (*keyFile == "") {
-		log.Fatal("-tls-cert e -tls-key vanno indicati insieme")
+		log.Fatal("-tls-cert and -tls-key must be given together")
 	}
 
 	s := mockbackend.New()
@@ -48,18 +48,18 @@ func main() {
 	}
 
 	if *certFile == "" {
-		log.Printf("mock backend in HTTP su %s (solo sviluppo, nessuna autenticazione)", *addr)
+		log.Printf("mock backend on HTTP at %s (development only, no authentication)", *addr)
 		log.Fatal(http.ListenAndServe(*addr, s.Handler()))
 	}
 
 	cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
 	if err != nil {
-		log.Fatalf("certificato del server: %v", err)
+		log.Fatalf("server certificate: %v", err)
 	}
 	s.RequireMTLS = true
 	tlsCfg := s.TLSConfig()
 	tlsCfg.Certificates = []tls.Certificate{cert}
 	srv := &http.Server{Addr: *addr, Handler: s.Handler(), TLSConfig: tlsCfg}
-	log.Printf("mock backend in HTTPS su %s: mTLS obbligatorio su /v1/agent/*, validità certificati %s (solo sviluppo)", *addr, s.CertLifetime)
+	log.Printf("mock backend on HTTPS at %s: mTLS required on /v1/agent/*, certificate validity %s (development only)", *addr, s.CertLifetime)
 	log.Fatal(srv.ListenAndServeTLS("", ""))
 }

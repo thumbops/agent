@@ -1,88 +1,98 @@
 # ThumbOps agent
 
-Agente Go che gira in ogni cluster: riceve dal backend le azioni approvate e le
-esegue entro la policy locale del cluster. Repository pubblico `thumbops/agent`
-(Apache 2.0).
+Go agent that runs in every cluster: it receives approved actions from the
+backend and runs them within the cluster's local policy. Public repository
+`thumbops/agent` (Apache 2.0).
 
-Il protocollo agente–backend è in `../spec/protocol/protocollo.md`
-(repository `thumbops/spec`), unica fonte di verità: se lo cambi, cambialo lì.
-Il contesto generale del progetto è in `../platform/CLAUDE.md`, se presente sul
-disco (repository privato). Non copiare in questo repository materiale interno
-(modello di business, piani, marchio).
+The agent–backend protocol is in `../spec/protocol/protocol.md`
+(repository `thumbops/spec`), the single source of truth: if you change it,
+change it there. The general project context is in `../platform/CLAUDE.md`, if
+present on disk (private repository). Do not copy internal material (business
+model, plans, brand) into this repository.
 
-Non eseguire mai l'agente o prove con kubectl su cluster reali senza una
-richiesta esplicita dell'utente: usa kind o l'API simulata.
+Never run the agent or kubectl experiments against real clusters without an
+explicit request from the user: use kind or the fake API.
 
-## Comandi
+Everything written into the repository is in English: code comments, docs,
+log and error messages, action result messages, tests, commit messages and PR
+descriptions.
+
+## Commands
 
 ```
-go test -race ./...     # tutti i test (API server e backend simulati)
+go test -race ./...     # all tests (fake API server and mock backend)
 go vet ./...
-gofmt -l .              # deve restituire nulla
+gofmt -l .              # must print nothing
 go run ./cmd/mock-backend -addr 127.0.0.1:8080
 go run ./cmd/thumbops-agent --dev-insecure --backend-url http://127.0.0.1:8080 --kube-api http://127.0.0.1:8001 --policy-file /tmp/policy.json
 ```
 
-Per provarlo su kind vedi `README.md`. Mai su un cluster di produzione.
+To try it on kind see `README.md` (including registration with mTLS against
+the mock backend in HTTPS mode). Never on a production cluster.
 
-## Struttura
+## Layout
 
-| Pacchetto | Ruolo |
+| Package | Role |
 | --- | --- |
-| `cmd/thumbops-agent` | Flag, avvio, registrazione iniziale |
-| `internal/protocol` | Tipi dei messaggi del protocollo v1 |
-| `internal/kube` | Client REST minimo per Kubernetes (solo libreria standard) |
-| `internal/actions` | Esecuzione di rollout-restart, scale, cordon, uncordon, drain |
-| `internal/policy` | Policy locale del cluster (JSON da ConfigMap) |
-| `internal/backend` | Client HTTP del backend |
-| `internal/identity` | Chiave Ed25519, CSR, certificato su disco |
-| `internal/enroll` | Registrazione e rinnovo del certificato |
-| `internal/agent` | Ciclo principale: heartbeat, poll, claim, esecuzione, esito |
-| `internal/kubefake` | API server simulato per i test |
-| `internal/mockbackend` | Backend simulato per test e sviluppo |
+| `cmd/thumbops-agent` | Flags, startup, initial registration |
+| `cmd/mock-backend` | Mock backend for development (HTTP, or HTTPS with mTLS) |
+| `internal/protocol` | Protocol v1 message types |
+| `internal/kube` | Minimal Kubernetes REST client (standard library only) |
+| `internal/actions` | Runs rollout-restart, scale, cordon, uncordon, drain |
+| `internal/policy` | Cluster local policy (JSON from a ConfigMap) |
+| `internal/backend` | Backend HTTP client |
+| `internal/identity` | Ed25519 key, CSR, certificate on disk |
+| `internal/enroll` | Registration and certificate renewal |
+| `internal/agent` | Main loop: heartbeat, poll, claim, execution, result |
+| `internal/kubefake` | Fake API server for tests |
+| `internal/mockbackend` | Mock backend for tests and development |
 
-## Perché niente client-go (per ora)
+## Why no client-go (for now)
 
-Il prototipo è stato scritto in un ambiente senza accesso a proxy.golang.org,
-quindi usa solo la libreria standard. Non è una scelta di design da difendere:
-client-go va introdotto per lo stato del cluster (informer), ed è accettabile
-migrare anche le azioni se semplifica il codice. In quel caso i test con
-`kubefake` vanno sostituiti o affiancati da test con il fake clientset o envtest.
+The prototype was written in an environment without access to
+proxy.golang.org, so it uses only the standard library. This is not a design
+choice to defend: client-go should be introduced for the cluster status
+(informers), and migrating the actions too is fine if it simplifies the code.
+In that case the `kubefake` tests should be replaced or complemented by tests
+with the fake clientset or envtest.
 
-## Invarianti da non rompere
+## Invariants not to break
 
-Ognuna è coperta da test; se un cambiamento li fa fallire, fermati e capisci perché.
+Each one is covered by tests; if a change makes them fail, stop and understand why.
 
-- **Claim prima di eseguire.** Un'azione si esegue solo dopo un claim riuscito
-  (`200`); `409`/`410` = scartare. Le azioni scadute non si reclamano nemmeno.
-- **Scadenze con l'orologio del backend.** L'agente corregge lo sfasamento con
-  `server_time` dell'heartbeat.
-- **Idempotenza nella stessa patch.** Le annotazioni `last-action-id` e
-  `last-action-result` vanno scritte nella stessa merge patch che applica la
-  modifica. Se trovi l'ID già presente, reinvia l'esito salvato.
-- **Policy default deny.** Senza file di policy tutto è rifiutato; campi
-  sconosciuti nella policy sono un errore di avvio. I nodi del control plane
-  sono protetti salvo `allow_control_plane_nodes`.
-- **Drain sicuro.** Blocca *prima* del cordon se ci sono pod senza controller o
-  con `emptyDir` (senza consenso); usa l'Eviction API (rispetta i PDB); ignora
-  DaemonSet, pod statici e terminati; a timeout il nodo resta in cordon e
-  l'esito elenca i pod rimasti.
-- **Esito mai perso.** L'invio del risultato si ritenta con backoff finché il
-  backend conferma (salvo `400`/`409`/`410`).
-- **Cambio di certificato = nuove connessioni.** Dopo registrazione e rinnovo va
-  chiamato `backend.Client.ResetConnections()` (lo fa `enroll.Activate`): il
-  certificato client si presenta solo all'handshake e il long polling tiene la
-  connessione sempre attiva. Questo bug è già stato trovato una volta.
-- **`401` ferma l'agente** (`ErrUnauthorized`); `426` lo lascia in sola modalità heartbeat.
-  Un certificato scaduto o rifiutato non produce un `401` ma un alert TLS
-  all'handshake: `backend.Unauthorized` tratta i due casi allo stesso modo,
-  altrimenti l'agente ritenterebbe all'infinito. Anche questo è stato visto su kind.
+- **Claim before running.** An action runs only after a successful claim
+  (`200`); `409`/`410` = discard. Expired actions are not even claimed.
+- **Deadlines use the backend clock.** The agent corrects clock skew with the
+  heartbeat's `server_time`.
+- **Idempotency in the same patch.** The `last-action-id` and
+  `last-action-result` annotations must be written in the same merge patch
+  that applies the change. If the ID is already there, resend the saved result.
+- **Policy default deny.** Without a policy file everything is rejected;
+  unknown fields in the policy are a startup error. Control plane nodes are
+  protected unless `allow_control_plane_nodes`.
+- **Safe drain.** Stop *before* cordoning if there are pods without a
+  controller or with `emptyDir` (without consent); use the Eviction API
+  (honors PDBs); skip DaemonSet, static and terminated pods; on timeout the
+  node stays cordoned and the result lists the remaining pods.
+- **Results are never lost.** Sending the result is retried with backoff
+  until the backend confirms (except `400`/`409`/`410`).
+- **Certificate change = new connections.** After registration and renewal
+  `backend.Client.ResetConnections()` must be called (`enroll.Activate` does
+  it): the client certificate is presented only at the handshake, and long
+  polling keeps the connection always active. This bug has been hit once.
+- **`401` stops the agent** (`ErrUnauthorized`); `426` leaves it in
+  heartbeat-only mode. An expired or rejected certificate produces no `401`
+  but a TLS alert at the handshake: `backend.Unauthorized` treats both cases
+  the same way, otherwise the agent would retry forever. This was also found
+  on kind.
 
-## Prossimi passi
+## Next steps
 
-1. Prova su kind con il backend finto; poi con il token del ServiceAccount per verificare l'RBAC reale.
-2. Stato del cluster: `PUT /v1/agent/status` ogni 60 s e su `status_requested`, con informer; formato e limiti in `../spec/protocol/protocollo.md` (sezione "Stato del cluster"). Rispettare `status.exclude_namespaces` della policy. ClusterRole separato in sola lettura.
-3. Chiave e certificato in un Secret gestito dall'agente invece che su PVC.
-4. Helm chart (sostituisce `deploy/agent.yaml`), probe di liveness/readiness, metriche Prometheus.
-5. CI (GitHub Actions): `go test -race`, `go vet`, `gofmt`, test end-to-end su kind; build dell'immagine.
-6. Aggiungere il file `LICENSE` (Apache 2.0).
+Done: test on kind with the mock backend, the ServiceAccount's real RBAC and
+registration with mTLS.
+
+1. Cluster status: `PUT /v1/agent/status` every 60 s and on `status_requested`, with informers; format and limits in `../spec/protocol/protocol.md` ("Cluster status" section). Honor the policy's `status.exclude_namespaces`. Separate read-only ClusterRole.
+2. Key and certificate in a Secret managed by the agent instead of a PVC. Decide at the same time whether the agent should re-register by itself when it stops with `ErrUnauthorized` and finds a new bootstrap token (today the state must be wiped by hand).
+3. Helm chart (replaces `deploy/agent.yaml`), liveness/readiness probes, Prometheus metrics.
+4. CI (GitHub Actions): `go test -race`, `go vet`, `gofmt`, end-to-end tests on kind; image build.
+5. Add the `LICENSE` file (Apache 2.0).

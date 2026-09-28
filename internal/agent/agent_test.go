@@ -60,7 +60,7 @@ func newEnv(t *testing.T, pol *policy.Policy) *env {
 	return &env{mb: mb, fk: fk, agent: a}
 }
 
-// run avvia l'agente e restituisce una funzione che lo ferma e ne riporta l'errore.
+// run starts the agent and returns a function that stops it and reports its error.
 func (e *env) run(t *testing.T) func() error {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -72,7 +72,7 @@ func (e *env) run(t *testing.T) func() error {
 		case err := <-done:
 			return err
 		case <-time.After(5 * time.Second):
-			t.Fatal("l'agente non si è fermato")
+			t.Fatal("the agent did not stop")
 			return nil
 		}
 	}
@@ -91,35 +91,35 @@ func TestEndToEndScale(t *testing.T) {
 	})
 	res, ok := e.mb.WaitResult("act-1", 5*time.Second)
 	if !ok {
-		t.Fatal("nessun esito ricevuto dal backend")
+		t.Fatal("no result received by the backend")
 	}
 	if res.Status != protocol.StatusSucceeded {
-		t.Fatalf("esito %s: %s", res.Status, res.Message)
+		t.Fatalf("status %s: %s", res.Status, res.Message)
 	}
 	if got := *e.fk.Deployment("payments", "payments-api").Spec.Replicas; got != 6 {
 		t.Fatalf("repliche = %d, attese 6", got)
 	}
 	if e.mb.State("act-1") != "done" {
-		t.Fatalf("stato nel backend: %s", e.mb.State("act-1"))
+		t.Fatalf("state in the backend: %s", e.mb.State("act-1"))
 	}
 }
 
 func TestHeartbeatContent(t *testing.T) {
 	e := newEnv(t, nil)
-	e.fk.Deny("create", "", "pods", "eviction") // niente drain
+	e.fk.Deny("create", "", "pods", "eviction") // no drain
 	stop := e.run(t)
 	e.mb.Enqueue(protocol.Action{ActionID: "act-1", Type: protocol.ActionCordon, Params: protocol.Params{Node: "worker-1"}})
 	if _, ok := e.mb.WaitResult("act-1", 5*time.Second); !ok {
-		t.Fatal("nessun esito")
+		t.Fatal("no result")
 	}
-	time.Sleep(150 * time.Millisecond) // almeno un heartbeat dopo l'azione
+	time.Sleep(150 * time.Millisecond) // at least one heartbeat after the action
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
 
 	hbs := e.mb.Heartbeats()
 	if len(hbs) < 2 {
-		t.Fatalf("attesi più heartbeat, ricevuti %d", len(hbs))
+		t.Fatalf("expected more heartbeats, received %d", len(hbs))
 	}
 	last := hbs[len(hbs)-1]
 	if last.AgentVersion != "0.1.0-test" || last.KubernetesVersion != "v1.34.3" {
@@ -149,14 +149,14 @@ func TestPolicyRejection(t *testing.T) {
 	for _, id := range []string{"big", "sys"} {
 		res, ok := e.mb.WaitResult(id, 5*time.Second)
 		if !ok {
-			t.Fatalf("%s: nessun esito", id)
+			t.Fatalf("%s: no result", id)
 		}
 		if res.Status != protocol.StatusRejected {
-			t.Fatalf("%s: esito %s, atteso rejected", id, res.Status)
+			t.Fatalf("%s: status %s, expected rejected", id, res.Status)
 		}
 	}
 	if len(e.fk.Patches()) != 0 {
-		t.Fatalf("nessuna modifica attesa sul cluster, trovate: %v", e.fk.Patches())
+		t.Fatalf("no change expected on the cluster, found: %v", e.fk.Patches())
 	}
 }
 
@@ -169,28 +169,28 @@ func TestControlPlaneNodeProtected(t *testing.T) {
 	e.mb.Enqueue(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "master-1"}})
 	res, ok := e.mb.WaitResult("d1", 5*time.Second)
 	if !ok || res.Status != protocol.StatusRejected || !strings.Contains(res.Message, "control plane") {
-		t.Fatalf("atteso rifiuto per nodo del control plane: %+v", res)
+		t.Fatalf("expected rejection for a control plane node: %+v", res)
 	}
 	if e.fk.Node("master-1").Spec.Unschedulable {
-		t.Fatal("il nodo del control plane non doveva essere toccato")
+		t.Fatal("the control plane node should not have been touched")
 	}
 }
 
 func TestExpiredActionIsNotClaimed(t *testing.T) {
 	e := newEnv(t, nil)
-	// L'agente riceve un'azione già scaduta (es. consegnata in ritardo).
+	// The agent receives an action that has already expired (e.g. delivered late).
 	e.agent.handle(context.Background(), protocol.Action{
 		ActionID: "old", Type: protocol.ActionCordon, Params: protocol.Params{Node: "worker-1"},
 		ExpiresAt: time.Now().Add(-time.Minute),
 	})
 	if len(e.fk.Patches()) != 0 {
-		t.Fatal("un'azione scaduta non va eseguita")
+		t.Fatal("an expired action must not run")
 	}
 }
 
 func TestClockSkewIsCorrected(t *testing.T) {
 	e := newEnv(t, nil)
-	e.agent.cfg.Now = func() time.Time { return time.Now().Add(10 * time.Minute) } // orologio locale avanti
+	e.agent.cfg.Now = func() time.Time { return time.Now().Add(10 * time.Minute) } // local clock ahead
 	if err := e.agent.heartbeat(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestClockSkewIsCorrected(t *testing.T) {
 	e.agent.handle(context.Background(), protocol.Action{ActionID: "a1", Type: protocol.ActionCordon,
 		Params: protocol.Params{Node: "worker-1"}, ExpiresAt: time.Now().Add(2 * time.Minute)})
 	if _, ok := e.mb.Result("a1"); !ok {
-		t.Fatal("con l'orologio corretto dall'heartbeat l'azione non è scaduta e va eseguita")
+		t.Fatal("with the clock corrected by the heartbeat the action has not expired and must run")
 	}
 }
 
@@ -210,13 +210,13 @@ func TestClaimConflictIsNotExecuted(t *testing.T) {
 	e.agent.handle(context.Background(), protocol.Action{ActionID: "taken", Type: protocol.ActionCordon,
 		Params: protocol.Params{Node: "worker-1"}, ExpiresAt: time.Now().Add(time.Minute)})
 	if len(e.fk.Patches()) != 0 {
-		t.Fatal("un'azione non presa in carico non va eseguita")
+		t.Fatal("an unclaimed action must not run")
 	}
 }
 
 func TestResultIsRetried(t *testing.T) {
 	e := newEnv(t, nil)
-	e.mb.ResultFailures = 3 // il backend risponde 503 tre volte
+	e.mb.ResultFailures = 3 // the backend responds 503 three times
 	stop := e.run(t)
 	defer stop()
 
@@ -224,10 +224,10 @@ func TestResultIsRetried(t *testing.T) {
 		Params: protocol.Params{Namespace: "payments", Deployment: "payments-api"}})
 	res, ok := e.mb.WaitResult("r1", 5*time.Second)
 	if !ok || res.Status != protocol.StatusSucceeded {
-		t.Fatalf("l'esito doveva arrivare dopo i tentativi: %+v %v", res, ok)
+		t.Fatalf("the result should have arrived after the retries: %+v %v", res, ok)
 	}
 	if n := len(e.fk.Patches()); n != 1 {
-		t.Fatalf("l'azione va eseguita una sola volta, patch: %d", n)
+		t.Fatalf("the action must run only once, patches: %d", n)
 	}
 }
 
@@ -239,19 +239,19 @@ func TestUnauthorizedStopsAgent(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, ErrUnauthorized) {
-			t.Fatalf("atteso ErrUnauthorized, ottenuto %v", err)
+			t.Fatalf("expected ErrUnauthorized, got %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("con 401 l'agente deve fermarsi")
+		t.Fatal("on 401 the agent must stop")
 	}
 }
 
-// Un certificato scaduto viene rifiutato all'handshake TLS, senza nessun 401:
-// l'agente deve fermarsi come per un 401, non ritentare all'infinito.
+// An expired certificate is rejected at the TLS handshake, with no 401:
+// the agent must stop as it does for a 401, not retry forever.
 func TestExpiredCertificateStopsAgent(t *testing.T) {
 	mb := mockbackend.New()
 	mb.RequireMTLS = true
-	mb.CertLifetime = -30 * time.Second // già scaduto all'emissione
+	mb.CertLifetime = -30 * time.Second // already expired when issued
 	srv := httptest.NewUnstartedServer(mb.Handler())
 	srv.TLS = mb.TLSConfig()
 	srv.StartTLS()
@@ -280,13 +280,13 @@ func TestExpiredCertificateStopsAgent(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, ErrUnauthorized) {
-			t.Fatalf("atteso ErrUnauthorized, ottenuto %v", err)
+			t.Fatalf("expected ErrUnauthorized, got %v", err)
 		}
 		if !strings.Contains(err.Error(), "expired certificate") {
-			t.Fatalf("l'errore deve indicare la causa: %v", err)
+			t.Fatalf("the error must name the cause: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("con il certificato scaduto l'agente deve fermarsi")
+		t.Fatal("with an expired certificate the agent must stop")
 	}
 }
 
@@ -302,10 +302,10 @@ func TestUpgradeRequiredKeepsHeartbeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !e.agent.isHeartbeatOnly() {
-		t.Fatal("con 426 l'agente deve passare alla sola modalità heartbeat")
+		t.Fatal("on 426 the agent must switch to heartbeat-only mode")
 	}
 	if after <= before {
-		t.Fatal("in modalità heartbeat gli heartbeat devono continuare")
+		t.Fatal("in heartbeat-only mode heartbeats must continue")
 	}
 }
 
@@ -314,13 +314,13 @@ func TestBackendOutageBackoff(t *testing.T) {
 	e.mb.SetPollStatus(http.StatusServiceUnavailable)
 	stop := e.run(t)
 	time.Sleep(200 * time.Millisecond)
-	e.mb.SetPollStatus(0) // il backend torna disponibile
+	e.mb.SetPollStatus(0) // the backend is available again
 	e.mb.Enqueue(protocol.Action{ActionID: "after", Type: protocol.ActionCordon, Params: protocol.Params{Node: "worker-1"}})
 	res, ok := e.mb.WaitResult("after", 5*time.Second)
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
 	if !ok || res.Status != protocol.StatusSucceeded {
-		t.Fatalf("dopo il ripristino l'agente deve riprendere: %+v %v", res, ok)
+		t.Fatalf("after recovery the agent must resume: %+v %v", res, ok)
 	}
 }

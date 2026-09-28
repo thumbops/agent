@@ -1,10 +1,10 @@
-// Package protocol definisce i messaggi scambiati tra agente e backend
-// (vedi la scheda "Protocollo agente–backend" del documento di progetto).
+// Package protocol defines the messages exchanged between agent and backend
+// (see protocol/protocol.md in the thumbops/spec repository).
 package protocol
 
 import "time"
 
-// Tipi di azione ammessi dal protocollo v1.
+// Action types allowed by protocol v1.
 const (
 	ActionRolloutRestart = "rollout-restart"
 	ActionScale          = "scale"
@@ -13,15 +13,15 @@ const (
 	ActionDrain          = "drain"
 )
 
-// ActionTypes elenca tutti i tipi di azione noti.
+// ActionTypes lists all known action types.
 var ActionTypes = []string{ActionRolloutRestart, ActionScale, ActionCordon, ActionUncordon, ActionDrain}
 
-// IsNodeAction indica se l'azione agisce su un nodo invece che su un deployment.
+// IsNodeAction reports whether the action targets a node instead of a deployment.
 func IsNodeAction(t string) bool {
 	return t == ActionCordon || t == ActionUncordon || t == ActionDrain
 }
 
-// Esiti possibili di un'azione.
+// Possible outcomes of an action.
 const (
 	StatusSucceeded = "succeeded"
 	StatusFailed    = "failed"
@@ -75,8 +75,8 @@ type HeartbeatResponse struct {
 	MinAgentVersion string     `json:"min_agent_version"`
 }
 
-// Params contiene i parametri già risolti dal backend a partire dal runbook
-// e dalle scelte dell'utente nell'app.
+// Params holds the parameters already resolved by the backend from the runbook
+// and the user's choices in the app.
 type Params struct {
 	Namespace          string `json:"namespace,omitempty"`
 	Deployment         string `json:"deployment,omitempty"`

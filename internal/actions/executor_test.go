@@ -39,7 +39,7 @@ func pod(ns, name, node string, owners []kube.OwnerReference) kube.Pod {
 func expectStatus(t *testing.T, r protocol.Result, want string) {
 	t.Helper()
 	if r.Status != want {
-		t.Fatalf("esito %q, atteso %q (messaggio: %s)", r.Status, want, r.Message)
+		t.Fatalf("status %q, expected %q (message: %s)", r.Status, want, r.Message)
 	}
 }
 
@@ -55,17 +55,17 @@ func TestRolloutRestart(t *testing.T) {
 
 	d := fk.Deployment("payments", "payments-api")
 	if d.Spec.Template.Metadata.Annotations[annotationRestartedAt] == "" {
-		t.Fatal("manca l'annotazione restartedAt sul template")
+		t.Fatal("restartedAt annotation missing on the template")
 	}
 	if got := d.Metadata.Annotations[AnnotationLastActionID]; got != "a1" {
-		t.Fatalf("annotazione last-action-id = %q", got)
+		t.Fatalf("last-action-id annotation = %q", got)
 	}
 	var stored protocol.Result
 	if err := json.Unmarshal([]byte(d.Metadata.Annotations[AnnotationLastResult]), &stored); err != nil || stored.Status != protocol.StatusSucceeded {
-		t.Fatalf("esito salvato nell'annotazione non valido: %v %+v", err, stored)
+		t.Fatalf("invalid result stored in the annotation: %v %+v", err, stored)
 	}
 	if r.StartedAt.IsZero() || r.FinishedAt.Before(r.StartedAt) {
-		t.Fatalf("tempi dell'esito non validi: %v %v", r.StartedAt, r.FinishedAt)
+		t.Fatalf("invalid result times: %v %v", r.StartedAt, r.FinishedAt)
 	}
 }
 
@@ -77,17 +77,17 @@ func TestIdempotentReplay(t *testing.T) {
 		Params: protocol.Params{Namespace: "payments", Deployment: "payments-api"},
 	}
 	first := e.Execute(context.Background(), a)
-	second := e.Execute(context.Background(), a) // es. agente riavviato prima di inviare l'esito
+	second := e.Execute(context.Background(), a) // e.g. agent restarted before sending the result
 
 	expectStatus(t, second, protocol.StatusSucceeded)
 	if got := len(fk.Patches()); got != 1 {
-		t.Fatalf("attesa 1 patch, trovate %d: l'azione è stata ripetuta", got)
+		t.Fatalf("expected 1 patch, found %d: the action was repeated", got)
 	}
 	if second.Details["replayed"] != true {
-		t.Fatal("il secondo esito dovrebbe essere marcato come replayed")
+		t.Fatal("the second result should be marked as replayed")
 	}
 	if second.Message != first.Message || !second.StartedAt.Equal(first.StartedAt) {
-		t.Fatalf("l'esito reinviato è diverso dall'originale: %+v vs %+v", second, first)
+		t.Fatalf("the resent result differs from the original: %+v vs %+v", second, first)
 	}
 }
 
@@ -101,13 +101,13 @@ func TestScale(t *testing.T) {
 	})
 	expectStatus(t, r, protocol.StatusSucceeded)
 	if got := *fk.Deployment("payments", "payments-api").Spec.Replicas; got != 6 {
-		t.Fatalf("repliche = %d, attese 6", got)
+		t.Fatalf("replicas = %d, expected 6", got)
 	}
 	if r.Details["previous_replicas"] != 3 || r.Details["replicas"] != 6 {
-		t.Fatalf("dettagli non validi: %+v", r.Details)
+		t.Fatalf("invalid details: %+v", r.Details)
 	}
-	if r.Message != "payments/payments-api scalato da 3 a 6 repliche" {
-		t.Fatalf("messaggio inatteso: %s", r.Message)
+	if r.Message != "payments/payments-api scaled from 3 to 6 replicas" {
+		t.Fatalf("unexpected message: %s", r.Message)
 	}
 }
 
@@ -120,7 +120,7 @@ func TestScaleMissingReplicas(t *testing.T) {
 	})
 	expectStatus(t, r, protocol.StatusFailed)
 	if len(fk.Patches()) != 0 {
-		t.Fatal("nessuna modifica attesa")
+		t.Fatal("no change expected")
 	}
 }
 
@@ -131,8 +131,8 @@ func TestDeploymentNotFound(t *testing.T) {
 		Params: protocol.Params{Namespace: "payments", Deployment: "missing"},
 	})
 	expectStatus(t, r, protocol.StatusFailed)
-	if !strings.Contains(r.Message, "non trovato") {
-		t.Fatalf("messaggio inatteso: %s", r.Message)
+	if !strings.Contains(r.Message, "not found") {
+		t.Fatalf("unexpected message: %s", r.Message)
 	}
 }
 
@@ -145,8 +145,8 @@ func TestForbidden(t *testing.T) {
 		Params: protocol.Params{Namespace: "payments", Deployment: "payments-api"},
 	})
 	expectStatus(t, r, protocol.StatusFailed)
-	if !strings.Contains(r.Message, "permesso negato") {
-		t.Fatalf("messaggio inatteso: %s", r.Message)
+	if !strings.Contains(r.Message, "permission denied") {
+		t.Fatalf("unexpected message: %s", r.Message)
 	}
 }
 
@@ -157,16 +157,16 @@ func TestCordonUncordon(t *testing.T) {
 	r := e.Execute(context.Background(), protocol.Action{ActionID: "c1", Type: protocol.ActionCordon, Params: protocol.Params{Node: "worker-1"}})
 	expectStatus(t, r, protocol.StatusSucceeded)
 	if !fk.Node("worker-1").Spec.Unschedulable {
-		t.Fatal("il nodo dovrebbe essere in cordon")
+		t.Fatal("the node should be cordoned")
 	}
 
 	r = e.Execute(context.Background(), protocol.Action{ActionID: "u1", Type: protocol.ActionUncordon, Params: protocol.Params{Node: "worker-1"}})
 	expectStatus(t, r, protocol.StatusSucceeded)
 	if fk.Node("worker-1").Spec.Unschedulable {
-		t.Fatal("il nodo dovrebbe essere di nuovo schedulabile")
+		t.Fatal("the node should be schedulable again")
 	}
 	if r.Details["previously_unschedulable"] != true {
-		t.Fatalf("dettagli non validi: %+v", r.Details)
+		t.Fatalf("invalid details: %+v", r.Details)
 	}
 }
 
@@ -183,33 +183,33 @@ func TestDrain(t *testing.T) {
 	done := pod("batch", "job-1-xyz", "worker-1", ctrl("Job", "job-1"))
 	done.Status.Phase = "Succeeded"
 	fk.AddPod(done)
-	fk.AddPod(pod("payments", "api-3", "worker-2", ctrl("ReplicaSet", "api-rs"))) // altro nodo
-	fk.BlockEviction("payments", "api-2", 2)                                      // PDB: due rifiuti, poi ok
+	fk.AddPod(pod("payments", "api-3", "worker-2", ctrl("ReplicaSet", "api-rs"))) // other node
+	fk.BlockEviction("payments", "api-2", 2)                                      // PDB: two rejections, then ok
 
 	r := e.Execute(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 5}})
 	expectStatus(t, r, protocol.StatusSucceeded)
 
 	if !fk.Node("worker-1").Spec.Unschedulable {
-		t.Fatal("il nodo dovrebbe essere in cordon")
+		t.Fatal("the node should be cordoned")
 	}
 	for _, p := range []string{"api-1", "api-2"} {
 		if fk.PodExists("payments", p) {
-			t.Fatalf("il pod %s dovrebbe essere stato spostato", p)
+			t.Fatalf("pod %s should have been evicted", p)
 		}
 	}
 	for _, p := range [][2]string{{"kube-system", "fluent-bit-x"}, {"kube-system", "kube-proxy-worker-1"}, {"batch", "job-1-xyz"}, {"payments", "api-3"}} {
 		if !fk.PodExists(p[0], p[1]) {
-			t.Fatalf("il pod %s/%s non doveva essere toccato", p[0], p[1])
+			t.Fatalf("pod %s/%s should not have been touched", p[0], p[1])
 		}
 	}
 	if got := len(fk.Evictions()); got != 2 {
-		t.Fatalf("attese 2 eviction, trovate %d: %v", got, fk.Evictions())
+		t.Fatalf("expected 2 evictions, found %d: %v", got, fk.Evictions())
 	}
 	if fk.Node("worker-1").Metadata.Annotations[AnnotationLastActionID] != "d1" {
-		t.Fatal("manca l'annotazione dell'azione sul nodo")
+		t.Fatal("action annotation missing on the node")
 	}
-	if !strings.Contains(r.Message, "pod spostati 2, ignorati 3") {
-		t.Fatalf("messaggio inatteso: %s", r.Message)
+	if !strings.Contains(r.Message, "2 pods evicted, 3 skipped") {
+		t.Fatalf("unexpected message: %s", r.Message)
 	}
 }
 
@@ -223,13 +223,13 @@ func TestDrainBlockedByEmptyDir(t *testing.T) {
 	r := e.Execute(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1"}})
 	expectStatus(t, r, protocol.StatusFailed)
 	if fk.Node("worker-1").Spec.Unschedulable {
-		t.Fatal("il nodo non doveva essere messo in cordon")
+		t.Fatal("the node should not have been cordoned")
 	}
 	if !fk.PodExists("payments", "cache-1") {
-		t.Fatal("il pod non doveva essere toccato")
+		t.Fatal("the pod should not have been touched")
 	}
 
-	// Con il consenso esplicito il drain procede.
+	// With explicit consent the drain proceeds.
 	r = e.Execute(context.Background(), protocol.Action{ActionID: "d2", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", DeleteEmptyDirData: true}})
 	expectStatus(t, r, protocol.StatusSucceeded)
 }
@@ -241,11 +241,11 @@ func TestDrainBlockedByBarePod(t *testing.T) {
 
 	r := e.Execute(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1"}})
 	expectStatus(t, r, protocol.StatusFailed)
-	if !strings.Contains(r.Message, "default/debug-shell non è gestito da un controller") {
-		t.Fatalf("messaggio inatteso: %s", r.Message)
+	if !strings.Contains(r.Message, "default/debug-shell is not managed by a controller") {
+		t.Fatalf("unexpected message: %s", r.Message)
 	}
 	if fk.Node("worker-1").Spec.Unschedulable {
-		t.Fatal("il nodo non doveva essere messo in cordon")
+		t.Fatal("the node should not have been cordoned")
 	}
 }
 
@@ -254,22 +254,22 @@ func TestDrainTimeout(t *testing.T) {
 	fk.AddNode("worker-1", true, nil)
 	fk.AddPod(pod("payments", "api-1", "worker-1", ctrl("ReplicaSet", "api-rs")))
 	fk.AddPod(pod("payments", "db-0", "worker-1", ctrl("StatefulSet", "db")))
-	fk.BlockEviction("payments", "db-0", -1) // PDB che non si sblocca mai
+	fk.BlockEviction("payments", "db-0", -1) // PDB that never unblocks
 
 	start := time.Now()
 	r := e.Execute(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 1}})
 	expectStatus(t, r, protocol.StatusFailed)
 	if time.Since(start) > 3*time.Second {
-		t.Fatalf("il timeout non è stato rispettato: %s", time.Since(start))
+		t.Fatalf("the timeout was not honored: %s", time.Since(start))
 	}
-	if !strings.Contains(r.Message, "payments/db-0") || !strings.Contains(r.Message, "resta in cordon") {
-		t.Fatalf("messaggio inatteso: %s", r.Message)
+	if !strings.Contains(r.Message, "payments/db-0") || !strings.Contains(r.Message, "stays cordoned") {
+		t.Fatalf("unexpected message: %s", r.Message)
 	}
 	if fk.PodExists("payments", "api-1") {
-		t.Fatal("il pod non bloccato doveva comunque essere spostato")
+		t.Fatal("the unblocked pod should still have been evicted")
 	}
 	if !fk.Node("worker-1").Spec.Unschedulable {
-		t.Fatal("il nodo deve restare in cordon dopo un drain parziale")
+		t.Fatal("the node must stay cordoned after a partial drain")
 	}
 }
 

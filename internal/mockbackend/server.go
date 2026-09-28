@@ -1,5 +1,5 @@
-// Package mockbackend è un backend ThumbOps minimo, in memoria, che segue il
-// protocollo v1. Serve ai test e allo sviluppo locale; non è il backend reale.
+// Package mockbackend is a minimal in-memory ThumbOps backend that follows
+// protocol v1. It serves tests and local development; it is not the real backend.
 package mockbackend
 
 import (
@@ -43,13 +43,13 @@ type Server struct {
 
 	heartbeats []protocol.HeartbeatRequest
 
-	// Comportamenti configurabili nei test.
+	// Behaviors configurable in tests.
 	Poll           protocol.PollConfig
-	ClaimOverride  map[string]int // action_id → codice HTTP da restituire al claim
-	PollStatus     int            // se diverso da 0, il polling risponde con questo codice
-	ResultFailures int            // quante volte rispondere 503 all'invio dell'esito
+	ClaimOverride  map[string]int // action_id → HTTP status to return on claim
+	PollStatus     int            // if not 0, polling responds with this status
+	ResultFailures int            // how many times to respond 503 when the result is sent
 	BootstrapToken string
-	RequireMTLS    bool // richiede un certificato client valido su /v1/agent/*
+	RequireMTLS    bool // requires a valid client certificate on /v1/agent/*
 	CertLifetime   time.Duration
 	clusterID      string
 	tokenUsed      bool
@@ -94,20 +94,20 @@ func New() *Server {
 	}
 }
 
-// ClientCAs è il pool da usare come tls.Config.ClientCAs per il mTLS.
+// ClientCAs is the pool to use as tls.Config.ClientCAs for mTLS.
 func (s *Server) ClientCAs() *x509.CertPool {
 	p := x509.NewCertPool()
 	p.AddCert(s.caCert)
 	return p
 }
 
-// TLSConfig configura un server TLS che chiede (senza imporlo) il certificato
-// client: /v1/register funziona senza, /v1/agent/* lo richiede se RequireMTLS.
+// TLSConfig configures a TLS server that asks for (without requiring) the client
+// certificate: /v1/register works without it, /v1/agent/* requires it if RequireMTLS.
 func (s *Server) TLSConfig() *tls.Config {
 	return &tls.Config{ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: s.ClientCAs()}
 }
 
-// Enqueue aggiunge un'azione già approvata.
+// Enqueue adds an already approved action.
 func (s *Server) Enqueue(a protocol.Action) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,8 +124,8 @@ func (s *Server) Enqueue(a protocol.Action) {
 	s.notify = make(chan struct{})
 }
 
-// SetPollStatus cambia la risposta del polling anche mentre il server è in uso
-// (0 = comportamento normale).
+// SetPollStatus changes the polling response even while the server is in use
+// (0 = normal behavior).
 func (s *Server) SetPollStatus(code int) {
 	s.mu.Lock()
 	s.PollStatus = code
@@ -139,7 +139,7 @@ func (s *Server) Result(id string) (protocol.Result, bool) {
 	return r, ok
 }
 
-// WaitResult attende l'esito di un'azione.
+// WaitResult waits for the result of an action.
 func (s *Server) WaitResult(id string, timeout time.Duration) (protocol.Result, bool) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -172,7 +172,7 @@ func (s *Server) Renewals() int {
 	return s.renewals
 }
 
-// Handler espone le rotte del protocollo e, per lo sviluppo, due rotte /debug.
+// Handler exposes the protocol routes and, for development, two /debug routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/register", s.register)
@@ -186,7 +186,7 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.RequireMTLS && strings.HasPrefix(r.URL.Path, "/v1/agent/") {
 			if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
-				http.Error(w, "certificato client mancante o non valido", http.StatusUnauthorized)
+				http.Error(w, "client certificate missing or invalid", http.StatusUnauthorized)
 				return
 			}
 		}
@@ -203,21 +203,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func (s *Server) issue(csrPEM string) (string, time.Time, error) {
 	block, _ := pem.Decode([]byte(csrPEM))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
-		return "", time.Time{}, fmt.Errorf("CSR non valida")
+		return "", time.Time{}, fmt.Errorf("invalid CSR")
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	if err := csr.CheckSignature(); err != nil {
-		return "", time.Time{}, fmt.Errorf("firma della CSR non valida: %w", err)
+		return "", time.Time{}, fmt.Errorf("invalid CSR signature: %w", err)
 	}
 	now := time.Now()
 	notAfter := now.Add(s.CertLifetime)
 	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: s.clusterID}, // il CN è il cluster_id
+		Subject:      pkix.Name{CommonName: s.clusterID}, // the CN is the cluster_id
 		NotBefore:    now.Add(-time.Minute),
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -239,7 +239,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r.Header.Get("Authorization") != "Bearer "+s.BootstrapToken || s.tokenUsed {
-		http.Error(w, "token di bootstrap non valido o già usato", http.StatusUnauthorized)
+		http.Error(w, "bootstrap token invalid or already used", http.StatusUnauthorized)
 		return
 	}
 	cert, exp, err := s.issue(req.CSR)
@@ -282,7 +282,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, protocol.HeartbeatResponse{ServerTime: time.Now().UTC(), Poll: poll, MinAgentVersion: "0.1.0"})
 }
 
-// next restituisce la prima azione approvata e non scaduta; va chiamata con il lock.
+// next returns the first approved, unexpired action; must be called with the lock held.
 func (s *Server) next() *protocol.Action {
 	now := time.Now()
 	for _, e := range s.entries {
@@ -338,25 +338,25 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	e, ok := s.byID[id]
 	if !ok {
-		http.Error(w, "azione sconosciuta", http.StatusNotFound)
+		http.Error(w, "unknown action", http.StatusNotFound)
 		return
 	}
 	if code := s.ClaimOverride[id]; code != 0 {
-		e.state = stateCancelled // non viene più riproposta
+		e.state = stateCancelled // no longer offered
 		http.Error(w, http.StatusText(code), code)
 		return
 	}
 	switch {
 	case e.state == stateApproved && time.Now().After(e.action.ExpiresAt):
 		e.state = stateExpired
-		http.Error(w, "azione scaduta", http.StatusGone)
+		http.Error(w, "action expired", http.StatusGone)
 	case e.state == stateApproved:
 		e.state = stateClaimed
 		w.WriteHeader(http.StatusOK)
 	case e.state == stateExpired || e.state == stateCancelled:
-		http.Error(w, "azione scaduta o annullata", http.StatusGone)
+		http.Error(w, "action expired or canceled", http.StatusGone)
 	default:
-		http.Error(w, "azione già presa in carico", http.StatusConflict)
+		http.Error(w, "action already claimed", http.StatusConflict)
 	}
 }
 
@@ -371,12 +371,12 @@ func (s *Server) result(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	if s.ResultFailures > 0 {
 		s.ResultFailures--
-		http.Error(w, "backend temporaneamente non disponibile", http.StatusServiceUnavailable)
+		http.Error(w, "backend temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	e, ok := s.byID[id]
 	if !ok || e.state != stateClaimed {
-		http.Error(w, "azione non presa in carico", http.StatusConflict)
+		http.Error(w, "action not claimed", http.StatusConflict)
 		return
 	}
 	e.state = stateDone

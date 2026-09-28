@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// La policy di esempio nel manifest deve essere caricabile dall'agente.
+// The sample policy in the manifest must load in the agent.
 func TestManifestPolicyLoads(t *testing.T) {
 	data, err := os.ReadFile("../../deploy/agent.yaml")
 	if err != nil {
@@ -15,7 +15,7 @@ func TestManifestPolicyLoads(t *testing.T) {
 	s := string(data)
 	start := strings.Index(s, "policy.json: |")
 	if start < 0 {
-		t.Fatal("policy.json non trovata nel manifest")
+		t.Fatal("policy.json not found in the manifest")
 	}
 	var lines []string
 	for _, l := range strings.Split(s[start:], "\n")[1:] {
@@ -29,6 +29,6 @@ func TestManifestPolicyLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(p.AllowedActions) != 5 || p.MaxReplicas != 20 {
-		t.Fatalf("policy caricata in modo inatteso: %+v", p)
+		t.Fatalf("unexpected policy loaded: %+v", p)
 	}
 }

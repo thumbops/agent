@@ -1,6 +1,6 @@
-// Package kubefake è un API server Kubernetes simulato, in memoria, per i test.
-// Implementa solo le chiamate usate dall'agente, con le stesse risposte di
-// errore dell'API reale (404, 403, 429 per i PodDisruptionBudget).
+// Package kubefake is an in-memory fake Kubernetes API server for tests.
+// It implements only the calls the agent uses, with the same error responses
+// as the real API (404, 403, 429 for PodDisruptionBudgets).
 package kubefake
 
 import (
@@ -20,9 +20,9 @@ type Server struct {
 	deployments map[string]*kube.Deployment
 	nodes       map[string]*kube.Node
 	pods        map[string]*kube.Pod
-	namespaces  map[string]string // nome → UID
-	denied      map[string]bool   // es. "patch apps/deployments"
-	evictBlocks map[string]int    // "ns/pod" → quanti 429 restituire; -1 = sempre
+	namespaces  map[string]string // name → UID
+	denied      map[string]bool   // e.g. "patch apps/deployments"
+	evictBlocks map[string]int    // "ns/pod" → how many 429s to return; -1 = always
 	patches     []string
 	evictions   []string
 	version     string
@@ -58,7 +58,7 @@ func New() *Server {
 func (s *Server) URL() string { return s.srv.URL }
 func (s *Server) Close()      { s.srv.Close() }
 
-// Client restituisce un client dell'agente collegato a questo server.
+// Client returns an agent client connected to this server.
 func (s *Server) Client() *kube.Client {
 	c, err := kube.New(kube.Config{Host: s.srv.URL})
 	if err != nil {
@@ -67,7 +67,7 @@ func (s *Server) Client() *kube.Client {
 	return c
 }
 
-// --- preparazione dello stato ---
+// --- state setup ---
 
 func (s *Server) AddDeployment(ns, name string, replicas int32) {
 	s.mu.Lock()
@@ -101,21 +101,21 @@ func (s *Server) AddPod(p kube.Pod) {
 	s.pods[p.Metadata.Namespace+"/"+p.Metadata.Name] = &p
 }
 
-// Deny fa rispondere 403 a una chiamata, es. Deny("patch", "apps", "deployments", "").
+// Deny makes a call respond 403, e.g. Deny("patch", "apps", "deployments", "").
 func (s *Server) Deny(verb, group, resource, sub string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.denied[permKey(verb, group, resource, sub)] = true
 }
 
-// BlockEviction simula un PodDisruptionBudget: n risposte 429, -1 per sempre.
+// BlockEviction simulates a PodDisruptionBudget: n responses 429, -1 forever.
 func (s *Server) BlockEviction(ns, pod string, n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.evictBlocks[ns+"/"+pod] = n
 }
 
-// --- lettura dello stato ---
+// --- state inspection ---
 
 func (s *Server) Deployment(ns, name string) kube.Deployment {
 	s.mu.Lock()
@@ -161,7 +161,7 @@ func permKey(verb, group, resource, sub string) string {
 	return verb + " " + r
 }
 
-// allowed va chiamata con il lock preso.
+// allowed must be called with the lock held.
 func (s *Server) allowed(w http.ResponseWriter, verb, group, resource, sub string) bool {
 	if s.denied[permKey(verb, group, resource, sub)] {
 		writeStatus(w, http.StatusForbidden, "Forbidden", fmt.Sprintf("%s is forbidden", permKey(verb, group, resource, sub)))
@@ -359,7 +359,7 @@ func (s *Server) accessReview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// applyPatch applica una JSON merge patch (RFC 7386) come fa l'API server.
+// applyPatch applies a JSON merge patch (RFC 7386) as the API server does.
 func applyPatch(w http.ResponseWriter, r *http.Request, cur, out any) bool {
 	if ct := r.Header.Get("Content-Type"); ct != "application/merge-patch+json" {
 		writeStatus(w, http.StatusUnsupportedMediaType, "UnsupportedMediaType", "content type "+ct)
@@ -372,7 +372,7 @@ func applyPatch(w http.ResponseWriter, r *http.Request, cur, out any) bool {
 	}
 	var patch map[string]any
 	if err := json.Unmarshal(body, &patch); err != nil {
-		writeStatus(w, http.StatusBadRequest, "BadRequest", "patch non valida: "+err.Error())
+		writeStatus(w, http.StatusBadRequest, "BadRequest", "invalid patch: "+err.Error())
 		return false
 	}
 	b, _ := json.Marshal(cur)
