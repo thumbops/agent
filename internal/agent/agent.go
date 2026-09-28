@@ -50,6 +50,11 @@ type Agent struct {
 // (cluster revocato o certificato scaduto): serve una nuova registrazione.
 var ErrUnauthorized = errors.New("il backend rifiuta il certificato dell'agente: cluster revocato o certificato non valido, serve una nuova registrazione")
 
+// unauthorized conserva la causa (401 o alert TLS) accanto a ErrUnauthorized.
+func unauthorized(cause error) error {
+	return fmt.Errorf("%w (%v)", ErrUnauthorized, cause)
+}
+
 func New(cfg Config, b *backend.Client, k *kube.Client, exec *actions.Executor, pol *policy.Policy) *Agent {
 	if cfg.HeartbeatInterval == 0 {
 		cfg.HeartbeatInterval = 60 * time.Second
@@ -79,8 +84,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer cancel() // ferma anche la goroutine degli heartbeat
 
 	if err := a.heartbeat(ctx); err != nil {
-		if backend.Code(err) == http.StatusUnauthorized {
-			return ErrUnauthorized
+		if backend.Unauthorized(err) {
+			return unauthorized(err)
 		}
 		a.log.Warn("primo heartbeat non riuscito", "err", err)
 	}
@@ -95,8 +100,8 @@ func (a *Agent) Run(ctx context.Context) error {
 				return
 			case <-t.C:
 				if err := a.heartbeat(ctx); err != nil {
-					if backend.Code(err) == http.StatusUnauthorized {
-						fatal <- ErrUnauthorized
+					if backend.Unauthorized(err) {
+						fatal <- unauthorized(err)
 						return
 					}
 					if ctx.Err() == nil {
@@ -128,9 +133,10 @@ func (a *Agent) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if backend.Unauthorized(err) {
+				return unauthorized(err)
+			}
 			switch backend.Code(err) {
-			case http.StatusUnauthorized:
-				return ErrUnauthorized
 			case http.StatusUpgradeRequired:
 				a.log.Error("versione dell'agente non più supportata: resta attivo solo l'heartbeat, aggiornare l'agente")
 				a.setHeartbeatOnly()

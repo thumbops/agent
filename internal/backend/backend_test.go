@@ -82,6 +82,50 @@ func TestBootstrapTokenIsSingleUse(t *testing.T) {
 	}
 }
 
+// Un certificato scaduto o firmato da una CA che il backend non riconosce
+// viene rifiutato durante l'handshake TLS, prima di qualunque risposta HTTP:
+// per l'agente deve valere come un 401.
+func TestRejectedCertificateIsUnauthorized(t *testing.T) {
+	t.Run("scaduto", func(t *testing.T) {
+		mb, srv, roots := startTLS(t)
+		mb.CertLifetime = -30 * time.Second // già scaduto all'emissione
+		c, holder := newClient(srv, roots)
+		if err := enroll.Register(context.Background(), c, identity.Store{Dir: t.TempDir()}, holder, "bootstrap-test-token", info); err != nil {
+			t.Fatal(err)
+		}
+		_, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{})
+		if !backend.Unauthorized(err) {
+			t.Fatalf("certificato scaduto: atteso rifiuto equivalente a 401, ottenuto %v", err)
+		}
+	})
+	t.Run("CA sconosciuta", func(t *testing.T) {
+		_, srv1, roots1 := startTLS(t)
+		c1, holder := newClient(srv1, roots1)
+		if err := enroll.Register(context.Background(), c1, identity.Store{Dir: t.TempDir()}, holder, "bootstrap-test-token", info); err != nil {
+			t.Fatal(err)
+		}
+		// Stesso certificato client presentato a un backend con un'altra CA.
+		_, srv2, roots2 := startTLS(t)
+		c2 := backend.New(backend.Options{BaseURL: srv2.URL, TLS: holder.ClientTLS(roots2)})
+		_, err := c2.Heartbeat(context.Background(), protocol.HeartbeatRequest{})
+		if !backend.Unauthorized(err) {
+			t.Fatalf("CA sconosciuta: atteso rifiuto equivalente a 401, ottenuto %v", err)
+		}
+	})
+	t.Run("errori di rete e del server non contano", func(t *testing.T) {
+		_, srv, roots := startTLS(t)
+		c, _ := newClient(srv, roots)
+		srv.Close()
+		_, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{})
+		if err == nil || backend.Unauthorized(err) {
+			t.Fatalf("backend irraggiungibile: atteso errore temporaneo, ottenuto %v", err)
+		}
+		if backend.Unauthorized(&backend.StatusError{Code: http.StatusServiceUnavailable}) {
+			t.Fatal("503 non è un rifiuto del certificato")
+		}
+	})
+}
+
 func TestKeyIsReused(t *testing.T) {
 	store := identity.Store{Dir: t.TempDir()}
 	k1, err := store.LoadOrCreateKey()

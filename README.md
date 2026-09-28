@@ -40,7 +40,7 @@ invio dell'esito e rinnovo del certificato. Le azioni sono cinque:
 
 ```
 cmd/thumbops-agent   comando dell'agente
-cmd/mock-backend     backend finto per lo sviluppo locale
+cmd/mock-backend     backend finto per lo sviluppo locale (HTTP, o HTTPS con mTLS)
 internal/protocol    messaggi del protocollo
 internal/kube        client REST minimo per Kubernetes
 internal/actions     esecuzione delle azioni
@@ -105,6 +105,27 @@ kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificat
 go run ./cmd/thumbops-agent --dev-insecure --backend-url http://127.0.0.1:8080 \
   --kube-api "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" \
   --kube-token "$TOKEN" --kube-ca-file /tmp/kind-ca.crt --policy-file /tmp/policy.json
+```
+
+### Registrazione, mTLS e rinnovo
+
+Con `-tls-cert` e `-tls-key` il backend finto serve HTTPS come quello reale:
+token di bootstrap monouso, mTLS obbligatorio su `/v1/agent/*`, rinnovo del
+certificato. Con `-cert-lifetime` corto il rinnovo scatta dopo pochi secondi
+(quando resta meno di un terzo della validità, controllato a ogni heartbeat).
+La CA dei certificati client si rigenera a ogni avvio del backend finto: dopo
+un suo riavvio l'agente va registrato di nuovo con uno `--state-dir` vuoto.
+
+```
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 7 -subj /CN=mock-backend \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" -keyout /tmp/server.key -out /tmp/server.crt
+go run ./cmd/mock-backend -addr 127.0.0.1:8443 -tls-cert /tmp/server.crt -tls-key /tmp/server.key \
+  -bootstrap-token segreto-di-prova -cert-lifetime 90s
+echo segreto-di-prova > /tmp/bootstrap-token
+go run ./cmd/thumbops-agent --backend-url https://127.0.0.1:8443 --backend-ca-file /tmp/server.crt \
+  --bootstrap-token-file /tmp/bootstrap-token --state-dir /tmp/thumbops-state --heartbeat-interval 10s \
+  --kube-api http://127.0.0.1:8001 --policy-file /tmp/policy.json
+curl --cacert /tmp/server.crt https://127.0.0.1:8443/debug/actions
 ```
 
 ## Cosa manca per la produzione
