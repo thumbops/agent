@@ -195,3 +195,9 @@ func (c *Client) SendResult(ctx context.Context, actionID string, res protocol.R
 	_, err := c.do(ctx, http.MethodPost, "/v1/agent/actions/"+url.PathEscape(actionID)+"/result", "", defaultTimeout, res, nil)
 	return err
 }
+
+// PutStatus sends the cluster status summary; the backend keeps only the latest.
+func (c *Client) PutStatus(ctx context.Context, s protocol.ClusterStatus) error {
+	_, err := c.do(ctx, http.MethodPut, "/v1/agent/status", "", defaultTimeout, s, nil)
+	return err
+}

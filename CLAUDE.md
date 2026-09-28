@@ -37,24 +37,26 @@ the mock backend in HTTPS mode). Never on a production cluster.
 | `cmd/thumbops-agent` | Flags, startup, initial registration |
 | `cmd/mock-backend` | Mock backend for development (HTTP, or HTTPS with mTLS) |
 | `internal/protocol` | Protocol v1 message types |
-| `internal/kube` | Minimal Kubernetes REST client (standard library only) |
+| `internal/kube` | Minimal Kubernetes REST client (standard library only), used by the actions |
 | `internal/actions` | Runs rollout-restart, scale, cordon, uncordon, drain |
 | `internal/policy` | Cluster local policy (JSON from a ConfigMap) |
 | `internal/backend` | Backend HTTP client |
 | `internal/identity` | Ed25519 key, CSR, certificate on disk |
 | `internal/enroll` | Registration and certificate renewal |
-| `internal/agent` | Main loop: heartbeat, poll, claim, execution, result |
+| `internal/agent` | Main loop: heartbeat, poll, claim, execution, result, status sending |
+| `internal/status` | Cluster status for the dashboard: client-go informers and the summary |
 | `internal/kubefake` | Fake API server for tests |
 | `internal/mockbackend` | Mock backend for tests and development |
 
-## Why no client-go (for now)
+## client-go and the REST client
 
-The prototype was written in an environment without access to
-proxy.golang.org, so it uses only the standard library. This is not a design
-choice to defend: client-go should be introduced for the cluster status
-(informers), and migrating the actions too is fine if it simplifies the code.
-In that case the `kubefake` tests should be replaced or complemented by tests
-with the fake clientset or envtest.
+The cluster status uses client-go informers (`internal/status`), tested with
+the fake clientset. The actions still use the small REST client in
+`internal/kube`, written when the prototype had no access to
+proxy.golang.org; migrating them to client-go is fine if it simplifies the
+code, replacing or complementing the `kubefake` tests with the fake clientset
+or envtest. client-go logs through klog, which `main` routes to the same JSON
+`slog` logger.
 
 ## Invariants not to break
 
@@ -85,14 +87,22 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
   but a TLS alert at the handshake: `backend.Unauthorized` treats both cases
   the same way, otherwise the agent would retry forever. This was also found
   on kind.
+- **The status never blocks the actions.** Without the
+  `thumbops-agent-status` RBAC the informers never sync, no status is sent,
+  a warning is logged after a minute, and actions keep working; the status
+  resumes by itself once the RBAC is back.
+- **Excluded namespaces are never listed.** Pods and deployments in the
+  policy's `status.exclude_namespaces` never appear in the status (their
+  requests still count in the aggregates, which carry no names).
 
 ## Next steps
 
 Done: test on kind with the mock backend, the ServiceAccount's real RBAC and
-registration with mTLS.
+registration with mTLS; cluster status with informers, checked on kind
+against the real backend.
 
-1. Cluster status: `PUT /v1/agent/status` every 60 s and on `status_requested`, with informers; format and limits in `../spec/protocol/protocol.md` ("Cluster status" section). Honor the policy's `status.exclude_namespaces`. Separate read-only ClusterRole.
-2. Key and certificate in a Secret managed by the agent instead of a PVC. Decide at the same time whether the agent should re-register by itself when it stops with `ErrUnauthorized` and finds a new bootstrap token (today the state must be wiped by hand).
-3. Helm chart (replaces `deploy/agent.yaml`), liveness/readiness probes, Prometheus metrics.
-4. CI (GitHub Actions): `go test -race`, `go vet`, `gofmt`, end-to-end tests on kind; image build.
-5. Add the `LICENSE` file (Apache 2.0).
+1. Key and certificate in a Secret managed by the agent instead of a PVC. Decide at the same time whether the agent should re-register by itself when it stops with `ErrUnauthorized` and finds a new bootstrap token (today the state must be wiped by hand).
+2. Helm chart (replaces `deploy/agent.yaml`), liveness/readiness probes, Prometheus metrics.
+3. CI (GitHub Actions): `go test -race`, `go vet`, `gofmt`, end-to-end tests on kind; image build.
+4. Add the `LICENSE` file (Apache 2.0).
+5. Status: events and real usage from metrics-server, when the dashboard needs them (out of the MVP).

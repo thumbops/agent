@@ -42,6 +42,10 @@ type Server struct {
 	notify  chan struct{}
 
 	heartbeats []protocol.HeartbeatRequest
+	statuses   []protocol.ClusterStatus
+	// statusRequested is returned once in the next poll response.
+	statusRequested bool
+	statusCode      int // if not 0, PUT /v1/agent/status responds with this status
 
 	// Behaviors configurable in tests.
 	Poll           protocol.PollConfig
@@ -160,6 +164,30 @@ func (s *Server) State(id string) string {
 	return ""
 }
 
+// RequestStatus asks the agent for a fresh status, as the app's refresh does:
+// the next poll response carries status_requested.
+func (s *Server) RequestStatus() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statusRequested = true
+	close(s.notify)
+	s.notify = make(chan struct{})
+}
+
+// SetStatusCode makes PUT /v1/agent/status respond with code (0 = normal).
+func (s *Server) SetStatusCode(code int) {
+	s.mu.Lock()
+	s.statusCode = code
+	s.mu.Unlock()
+}
+
+// Statuses returns the status summaries received so far.
+func (s *Server) Statuses() []protocol.ClusterStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]protocol.ClusterStatus(nil), s.statuses...)
+}
+
 func (s *Server) Heartbeats() []protocol.HeartbeatRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,6 +206,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/register", s.register)
 	mux.HandleFunc("POST /v1/agent/certificate", s.renew)
 	mux.HandleFunc("PUT /v1/agent/heartbeat", s.heartbeat)
+	mux.HandleFunc("PUT /v1/agent/status", s.status)
 	mux.HandleFunc("GET /v1/agent/actions", s.poll)
 	mux.HandleFunc("POST /v1/agent/actions/{id}/claim", s.claim)
 	mux.HandleFunc("POST /v1/agent/actions/{id}/result", s.result)
@@ -282,6 +311,22 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, protocol.HeartbeatResponse{ServerTime: time.Now().UTC(), Poll: poll, MinAgentVersion: "0.1.0"})
 }
 
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	var st protocol.ClusterStatus
+	if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.statusCode != 0 {
+		http.Error(w, http.StatusText(s.statusCode), s.statusCode)
+		return
+	}
+	s.statuses = append(s.statuses, st)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // next returns the first approved, unexpired action; must be called with the lock held.
 func (s *Server) next() *protocol.Action {
 	now := time.Now()
@@ -315,10 +360,16 @@ func (s *Server) poll(w http.ResponseWriter, r *http.Request) {
 	for {
 		s.mu.Lock()
 		a := s.next()
+		requested := s.statusRequested
+		s.statusRequested = false
 		ch := s.notify
 		s.mu.Unlock()
 		if a != nil {
-			writeJSON(w, http.StatusOK, protocol.ActionsResponse{Actions: []protocol.Action{*a}})
+			writeJSON(w, http.StatusOK, protocol.ActionsResponse{Actions: []protocol.Action{*a}, StatusRequested: requested})
+			return
+		}
+		if requested {
+			writeJSON(w, http.StatusOK, protocol.ActionsResponse{Actions: []protocol.Action{}, StatusRequested: true})
 			return
 		}
 		select {

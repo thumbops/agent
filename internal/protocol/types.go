@@ -108,3 +108,73 @@ type Result struct {
 	Message    string         `json:"message"`
 	Details    map[string]any `json:"details,omitempty"`
 }
+
+// ClusterStatus is the compact summary sent with PUT /v1/agent/status
+// (components.schemas.ClusterStatus in the contract).
+type ClusterStatus struct {
+	CollectedAt time.Time      `json:"collected_at"`
+	Resources   Resources      `json:"resources"`
+	Nodes       NodesSummary   `json:"nodes"`
+	Workloads   WorkloadsState `json:"workloads"`
+	Truncated   bool           `json:"truncated"`
+}
+
+type Resources struct {
+	CPU    CPUUsage    `json:"cpu"`
+	Memory MemoryUsage `json:"memory"`
+}
+
+// Used fields are null without metrics-server; the agent does not read
+// metrics yet, so they are always null.
+type CPUUsage struct {
+	AllocatableM int64  `json:"allocatable_m"`
+	RequestedM   int64  `json:"requested_m"`
+	UsedM        *int64 `json:"used_m"`
+}
+
+type MemoryUsage struct {
+	AllocatableMiB int64  `json:"allocatable_mib"`
+	RequestedMiB   int64  `json:"requested_mib"`
+	UsedMiB        *int64 `json:"used_mib"`
+}
+
+type NodesSummary struct {
+	Total    int          `json:"total"`
+	Ready    int          `json:"ready"`
+	Cordoned int          `json:"cordoned"`
+	Items    []NodeStatus `json:"items"`
+}
+
+type NodeStatus struct {
+	Name          string   `json:"name"`
+	Ready         bool     `json:"ready"`
+	Unschedulable bool     `json:"unschedulable"`
+	Conditions    []string `json:"conditions"`
+	CPU           struct {
+		AllocatableM int64 `json:"allocatable_m"`
+		RequestedM   int64 `json:"requested_m"`
+	} `json:"cpu"`
+	Memory struct {
+		AllocatableMiB int64 `json:"allocatable_mib"`
+		RequestedMiB   int64 `json:"requested_mib"`
+	} `json:"memory"`
+}
+
+type WorkloadsState struct {
+	UnhealthyPods       []UnhealthyPod       `json:"unhealthy_pods"`
+	DegradedDeployments []DegradedDeployment `json:"degraded_deployments"`
+}
+
+type UnhealthyPod struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Reason    string `json:"reason"`
+	Restarts  int32  `json:"restarts"`
+}
+
+type DegradedDeployment struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Ready     int32  `json:"ready"`
+	Desired   int32  `json:"desired"`
+}

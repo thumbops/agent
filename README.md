@@ -12,11 +12,20 @@ There are five actions: `rollout-restart`, `scale`, `cordon`, `uncordon`,
 
 ## Prototype choices
 
-- **Go standard library only.** The agent talks directly to the Kubernetes
-  REST API (merge patch, Eviction API, SelfSubjectAccessReview). No external
-  dependencies: the code is small and easy to review. The dashboard will need
-  client-go (informers), which can be introduced without changing the
-  protocol or the action logic.
+- **Actions on the Kubernetes REST API, status with client-go.** The actions
+  talk directly to the REST API (merge patch, Eviction API,
+  SelfSubjectAccessReview) through a small client written with the standard
+  library. The cluster status for the dashboard uses client-go informers, so
+  building a summary never queries the API server.
+- **Cluster status** (`PUT /v1/agent/status`): every 60 s
+  (`--status-interval`) and right away when the backend asks for it
+  (`status_requested`). Nodes (all up to 100, then only the ones with
+  problems), requested versus allocatable CPU and memory, up to 20 unhealthy
+  pods (crash loops, images that cannot start, failed pods, pods pending for
+  more than 2 minutes) and 20 degraded deployments, sorted by severity.
+  Namespaces in the policy's `status.exclude_namespaces` are never listed.
+  It needs the read-only `thumbops-agent-status` ClusterRole; without it no
+  status is sent and the actions keep working. `--status=false` turns it off.
 - **Idempotency through annotations.** Every modified resource gets
   `thumbops.mobiletechnologies.cloud/last-action-id` and
   `.../last-action-result`, in the same patch as the change. If the agent
@@ -54,9 +63,10 @@ internal/backend     backend client
 internal/identity    Ed25519 key, CSR, certificate
 internal/enroll      registration and renewal
 internal/agent       main loop
+internal/status      cluster status: informers and summary
 internal/kubefake    fake API server (tests)
 internal/mockbackend mock backend (tests and development)
-deploy/agent.yaml    manifest: RBAC, policy, Deployment
+deploy/agent.yaml    manifest: RBAC (actions and status), policy, Deployment
 ```
 
 ## Tests
@@ -137,7 +147,6 @@ curl --cacert /tmp/server.crt https://127.0.0.1:8443/debug/actions
 
 ## Missing for production
 
-- Cluster status for the dashboard (`PUT /v1/agent/status`, with informers).
 - Key and certificate in a Secret instead of a volume.
 - Prometheus metrics for the agent and liveness probes.
 - Tests on real clusters (kind in CI) besides the ones with the fake API.

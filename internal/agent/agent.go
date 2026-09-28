@@ -29,6 +29,17 @@ type Config struct {
 	Now               func() time.Time
 	// Renew is called after every successful heartbeat (certificate renewal).
 	Renew func(ctx context.Context) error
+	// Status, if set, is sent with PUT /v1/agent/status every StatusInterval
+	// and right away when a poll response has status_requested.
+	Status         StatusSource
+	StatusInterval time.Duration // default 60s
+	StatusRetry    time.Duration // until the first summary is ready; default 5s
+}
+
+// StatusSource builds the cluster status summary; ok is false while it is
+// not ready yet (informer caches not synced, e.g. missing RBAC).
+type StatusSource interface {
+	Collect(at time.Time) (s protocol.ClusterStatus, ok bool)
 }
 
 type Agent struct {
@@ -44,6 +55,8 @@ type Agent struct {
 	poll          protocol.PollConfig
 	lastActionID  string
 	heartbeatOnly bool
+
+	statusNow chan struct{} // status_requested from the backend
 }
 
 // ErrUnauthorized means the backend no longer accepts the certificate
@@ -71,9 +84,16 @@ func New(cfg Config, b *backend.Client, k *kube.Client, exec *actions.Executor, 
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.StatusInterval == 0 {
+		cfg.StatusInterval = 60 * time.Second
+	}
+	if cfg.StatusRetry == 0 {
+		cfg.StatusRetry = 5 * time.Second
+	}
 	return &Agent{
 		cfg: cfg, backend: b, kube: k, exec: exec, policy: pol, log: cfg.Logger,
-		poll: protocol.PollConfig{WaitSeconds: 20},
+		poll:      protocol.PollConfig{WaitSeconds: 20},
+		statusNow: make(chan struct{}, 1),
 	}
 }
 
@@ -91,6 +111,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	fatal := make(chan error, 1)
+	stop := func(err error) {
+		select {
+		case fatal <- err:
+		default: // another goroutine already reported a fatal error
+		}
+	}
+	if a.cfg.Status != nil {
+		go a.statusLoop(ctx, stop)
+	}
 	go func() {
 		t := time.NewTicker(a.cfg.HeartbeatInterval)
 		defer t.Stop()
@@ -101,7 +130,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			case <-t.C:
 				if err := a.heartbeat(ctx); err != nil {
 					if backend.Unauthorized(err) {
-						fatal <- unauthorized(err)
+						stop(unauthorized(err))
 						return
 					}
 					if ctx.Err() == nil {
@@ -150,13 +179,55 @@ func (a *Agent) Run(ctx context.Context) error {
 		backoff = a.cfg.InitialBackoff
 
 		if resp.StatusRequested {
-			a.log.Info("cluster status update requested: not implemented in the prototype yet")
+			select {
+			case a.statusNow <- struct{}{}:
+			default: // a refresh is already pending
+			}
 		}
 		for _, act := range resp.Actions {
 			a.handle(ctx, act)
 		}
 		if len(resp.Actions) == 0 && pc.IntervalSeconds > 0 {
 			sleep(ctx, time.Duration(pc.IntervalSeconds)*time.Second)
+		}
+	}
+}
+
+// statusLoop sends the cluster status every StatusInterval and when the
+// backend asks for it. A failed send is not retried: the next one carries
+// fresher data anyway.
+func (a *Agent) statusLoop(ctx context.Context, stop func(error)) {
+	start := a.cfg.Now()
+	warned := false
+	wait := a.cfg.StatusRetry // the first summary as soon as it is ready
+	for {
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		case <-a.statusNow:
+			t.Stop()
+		}
+		s, ok := a.cfg.Status.Collect(a.serverNow())
+		if !ok {
+			if !warned && a.cfg.Now().Sub(start) > time.Minute {
+				a.log.Warn("cluster status not available yet: check the thumbops-agent-status ClusterRole (get, list, watch on nodes, pods, deployments)")
+				warned = true
+			}
+			wait = a.cfg.StatusRetry
+			continue
+		}
+		wait = a.cfg.StatusInterval
+		if err := a.backend.PutStatus(ctx, s); err != nil {
+			if backend.Unauthorized(err) {
+				stop(unauthorized(err))
+				return
+			}
+			if ctx.Err() == nil {
+				a.log.Warn("sending the cluster status failed", "err", err)
+			}
 		}
 	}
 }
