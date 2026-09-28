@@ -21,6 +21,11 @@ import (
 	"github.com/thumbops/agent/internal/kube"
 	"github.com/thumbops/agent/internal/policy"
 	"github.com/thumbops/agent/internal/protocol"
+	"github.com/thumbops/agent/internal/status"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 )
 
 // version is set at build time with -ldflags "-X main.version=..."
@@ -40,6 +45,8 @@ func main() {
 		logLevel    = flag.String("log-level", "info", "debug, info, warn, error")
 		showVersion = flag.Bool("version", false, "print the version and exit")
 		hbInterval  = flag.Duration("heartbeat-interval", 60*time.Second, "interval between heartbeats")
+		statusOn    = flag.Bool("status", true, "send the cluster status for the dashboard (needs the thumbops-agent-status ClusterRole)")
+		statusEvery = flag.Duration("status-interval", 60*time.Second, "interval between cluster status summaries")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -53,6 +60,7 @@ func main() {
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 	slog.SetDefault(log)
+	klog.SetSlogLogger(log) // client-go logs through klog: keep them JSON like the rest
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -79,6 +87,25 @@ func main() {
 
 	userAgent := "thumbops-agent/" + version
 	cfg := agent.Config{Version: version, HeartbeatInterval: *hbInterval, Logger: log}
+
+	if *statusOn {
+		// client-go reads the same connection settings; BearerTokenFile is
+		// re-read because the ServiceAccount token rotates.
+		cs, err := kubernetes.NewForConfig(&rest.Config{
+			Host:            kcfg.Host,
+			BearerToken:     kcfg.Token,
+			BearerTokenFile: kcfg.TokenFile,
+			TLSClientConfig: rest.TLSClientConfig{CAFile: kcfg.CAFile},
+			UserAgent:       userAgent,
+		})
+		if err != nil {
+			fatal("Kubernetes client for the cluster status: %v", err)
+		}
+		collector := status.NewCollector(cs, pol.Status.ExcludeNamespaces)
+		collector.Start(ctx)
+		cfg.Status = collector
+		cfg.StatusInterval = *statusEvery
+	}
 
 	var b *backend.Client
 	if *devInsecure {

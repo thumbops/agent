@@ -3,9 +3,11 @@
 #   kubectl apply -f deploy/agent.yaml
 #   kubectl -n thumbops create secret generic thumbops-bootstrap --from-literal=token=<SINGLE-USE TOKEN>
 #
-# The ClusterRole grants only what the five actions need. To install the
-# agent without write permissions, remove the "patch" and "create" verbs
-# and leave "allowed_actions" empty in the policy.
+# Two ClusterRoles: thumbops-agent-actions grants only what the five actions
+# need; thumbops-agent-status is read-only, for the dashboard's cluster status.
+# To install the agent for the dashboard only, drop the actions ClusterRole
+# and binding and leave "allowed_actions" empty in the policy; to install it
+# without the dashboard, drop the status ones and run it with --status=false.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -56,6 +58,32 @@ subjects:
     name: thumbops-agent
     namespace: thumbops
 ---
+# Cluster status for the dashboard: read-only, watched through informers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: thumbops-agent-status
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: thumbops-agent-status
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: thumbops-agent-status
+subjects:
+  - kind: ServiceAccount
+    name: thumbops-agent
+    namespace: thumbops
+---
 # Local policy: managed by the cluster team, not by the backend.
 # An action outside the policy is rejected even if approved in the app.
 apiVersion: v1
@@ -70,7 +98,8 @@ data:
       "denied_namespaces": ["kube-system", "thumbops"],
       "max_replicas": 20,
       "allow_delete_emptydir_data": false,
-      "allow_control_plane_nodes": false
+      "allow_control_plane_nodes": false,
+      "status": { "exclude_namespaces": [] }
     }
 ---
 apiVersion: apps/v1

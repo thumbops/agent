@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ type env struct {
 	agent *Agent
 }
 
-func newEnv(t *testing.T, pol *policy.Policy) *env {
+func newEnv(t *testing.T, pol *policy.Policy, opts ...func(*Config)) *env {
 	t.Helper()
 	mb := mockbackend.New()
 	mb.Poll = protocol.PollConfig{WaitSeconds: 1}
@@ -50,13 +51,17 @@ func newEnv(t *testing.T, pol *policy.Policy) *env {
 			MaxReplicas:      10,
 		}
 	}
-	a := New(Config{
+	cfg := Config{
 		Version:           "0.1.0-test",
 		HeartbeatInterval: 50 * time.Millisecond,
 		InitialBackoff:    5 * time.Millisecond,
 		MaxBackoff:        20 * time.Millisecond,
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}, backend.New(backend.Options{BaseURL: srv.URL}), k, exec, pol)
+	}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	a := New(cfg, backend.New(backend.Options{BaseURL: srv.URL}), k, exec, pol)
 	return &env{mb: mb, fk: fk, agent: a}
 }
 
@@ -322,5 +327,88 @@ func TestBackendOutageBackoff(t *testing.T) {
 	}
 	if !ok || res.Status != protocol.StatusSucceeded {
 		t.Fatalf("after recovery the agent must resume: %+v %v", res, ok)
+	}
+}
+
+// fakeStatus stands in for the informer-based collector.
+type fakeStatus struct {
+	mu    sync.Mutex
+	ready bool
+	calls int
+}
+
+func (f *fakeStatus) Collect(at time.Time) (protocol.ClusterStatus, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	return protocol.ClusterStatus{CollectedAt: at, Nodes: protocol.NodesSummary{Total: f.calls}}, f.ready
+}
+
+func (f *fakeStatus) setReady() {
+	f.mu.Lock()
+	f.ready = true
+	f.mu.Unlock()
+}
+
+func waitStatuses(t *testing.T, e *env, n int) []protocol.ClusterStatus {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if s := e.mb.Statuses(); len(s) >= n {
+			return s
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected %d status summaries, got %d", n, len(e.mb.Statuses()))
+	return nil
+}
+
+func TestStatusSentWhenReadyAndOnRequest(t *testing.T) {
+	src := &fakeStatus{}
+	e := newEnv(t, nil, func(c *Config) {
+		c.Status = src
+		c.StatusRetry = 10 * time.Millisecond
+		c.StatusInterval = time.Hour // only the first summary and the requested ones
+	})
+	stop := e.run(t)
+	defer stop()
+
+	time.Sleep(100 * time.Millisecond)
+	if n := len(e.mb.Statuses()); n != 0 {
+		t.Fatalf("nothing must be sent before the caches sync, got %d", n)
+	}
+	src.setReady()
+	waitStatuses(t, e, 1)
+
+	e.mb.RequestStatus() // the user pressed refresh in the app
+	got := waitStatuses(t, e, 2)
+	if got[1].CollectedAt.Before(got[0].CollectedAt) {
+		t.Fatal("the requested summary must be a new one")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := len(e.mb.Statuses()); n != 2 {
+		t.Fatalf("one request, one summary: got %d", n)
+	}
+}
+
+func TestStatusUnauthorizedStopsAgent(t *testing.T) {
+	src := &fakeStatus{ready: true}
+	e := newEnv(t, nil, func(c *Config) {
+		c.Status = src
+		c.StatusRetry = 10 * time.Millisecond
+		c.HeartbeatInterval = time.Hour
+	})
+	done := make(chan error, 1)
+	go func() { done <- e.agent.Run(context.Background()) }()
+	waitStatuses(t, e, 1)
+	e.mb.SetStatusCode(http.StatusUnauthorized)
+	e.mb.RequestStatus()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("expected ErrUnauthorized, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a 401 on the status must stop the agent")
 	}
 }
