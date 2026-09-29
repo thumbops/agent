@@ -46,6 +46,7 @@ type Server struct {
 	// statusRequested is returned once in the next poll response.
 	statusRequested bool
 	statusCode      int // if not 0, PUT /v1/agent/status responds with this status
+	heartbeatCode   int // if not 0, PUT /v1/agent/heartbeat responds with this status
 
 	// Behaviors configurable in tests.
 	Poll           protocol.PollConfig
@@ -137,6 +138,13 @@ func (s *Server) SetPollStatus(code int) {
 	s.mu.Lock()
 	s.PollStatus = code
 	s.mu.Unlock()
+}
+
+// SetHeartbeatStatus makes the heartbeat respond with code (0 = normal).
+func (s *Server) SetHeartbeatStatus(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heartbeatCode = code
 }
 
 func (s *Server) Result(id string) (protocol.Result, bool) {
@@ -324,6 +332,11 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	if code := s.heartbeatCode; code != 0 {
+		s.mu.Unlock()
+		http.Error(w, http.StatusText(code), code)
+		return
+	}
 	s.heartbeats = append(s.heartbeats, req)
 	poll := s.Poll
 	s.mu.Unlock()

@@ -15,7 +15,9 @@ import (
 
 	"github.com/thumbops/agent/internal/actions"
 	"github.com/thumbops/agent/internal/backend"
+	"github.com/thumbops/agent/internal/health"
 	"github.com/thumbops/agent/internal/kube"
+	"github.com/thumbops/agent/internal/metrics"
 	"github.com/thumbops/agent/internal/policy"
 	"github.com/thumbops/agent/internal/protocol"
 )
@@ -34,6 +36,9 @@ type Config struct {
 	Status         StatusSource
 	StatusInterval time.Duration // default 60s
 	StatusRetry    time.Duration // until the first summary is ready; default 5s
+	// Metrics and Health are optional (nil records nothing).
+	Metrics *metrics.Metrics
+	Health  *health.State
 }
 
 // StatusSource builds the cluster status summary; ok is false while it is
@@ -101,7 +106,8 @@ func New(cfg Config, b *backend.Client, k *kube.Client, exec *actions.Executor, 
 // the agent can no longer work (ErrUnauthorized).
 func (a *Agent) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel() // also stops the heartbeat goroutine
+	defer cancel()           // also stops the heartbeat goroutine
+	a.cfg.Health.MarkReady() // startup is complete: policy and identity are loaded
 
 	if err := a.heartbeat(ctx); err != nil {
 		if backend.Unauthorized(err) {
@@ -211,6 +217,7 @@ func (a *Agent) statusLoop(ctx context.Context, stop func(error)) {
 			t.Stop()
 		}
 		s, ok := a.cfg.Status.Collect(a.serverNow())
+		a.cfg.Metrics.StatusReady(ok)
 		if !ok {
 			if !warned && a.cfg.Now().Sub(start) > time.Minute {
 				a.log.Warn("cluster status not available yet: check the thumbops-agent-status ClusterRole (get, list, watch on nodes, pods, deployments)")
@@ -228,7 +235,9 @@ func (a *Agent) statusLoop(ctx context.Context, stop func(error)) {
 			if ctx.Err() == nil {
 				a.log.Warn("sending the cluster status failed", "err", err)
 			}
+			continue
 		}
+		a.cfg.Metrics.StatusSent(a.cfg.Now())
 	}
 }
 
@@ -237,14 +246,17 @@ func (a *Agent) handle(ctx context.Context, act protocol.Action) {
 
 	if !act.ExpiresAt.IsZero() && a.serverNow().After(act.ExpiresAt) {
 		log.Warn("action expired, discarded without running it", "expires_at", act.ExpiresAt)
+		a.cfg.Metrics.ActionOutcome(act.Type, metrics.OutcomeExpired)
 		return
 	}
 	if err := a.backend.Claim(ctx, act.ActionID); err != nil {
 		switch backend.Code(err) {
 		case http.StatusConflict:
 			log.Info("action already claimed, discarded")
+			a.cfg.Metrics.ActionOutcome(act.Type, metrics.OutcomeDiscarded)
 		case http.StatusGone:
 			log.Info("action expired or canceled, discarded")
+			a.cfg.Metrics.ActionOutcome(act.Type, metrics.OutcomeDiscarded)
 		default:
 			log.Error("claim failed: the action will be offered again", "err", err)
 		}
@@ -256,9 +268,15 @@ func (a *Agent) handle(ctx context.Context, act protocol.Action) {
 		now := a.cfg.Now().UTC()
 		res = protocol.Result{Status: protocol.StatusRejected, StartedAt: now, FinishedAt: now, Message: err.Error()}
 		log.Warn("action rejected by the local policy", "reason", err)
+		a.cfg.Metrics.ActionOutcome(act.Type, protocol.StatusRejected)
 	} else {
 		log.Info("running action", "params", act.Params, "requested_by", act.RequestedBy)
+		a.cfg.Metrics.ActionRunning(true)
+		start := time.Now()
 		res = a.exec.Execute(ctx, act)
+		a.cfg.Metrics.ObserveActionDuration(act.Type, time.Since(start))
+		a.cfg.Metrics.ActionRunning(false)
+		a.cfg.Metrics.ActionOutcome(act.Type, res.Status)
 		log.Info("action finished", "status", res.Status, "message", res.Message)
 	}
 
@@ -334,6 +352,7 @@ func (a *Agent) permissions(ctx context.Context) map[string]bool {
 }
 
 func (a *Agent) heartbeat(ctx context.Context) error {
+	defer a.cfg.Health.HeartbeatAttempted() // any outcome proves the loop is alive
 	req := protocol.HeartbeatRequest{AgentVersion: a.cfg.Version, Permissions: a.permissions(ctx)}
 	if v, err := a.kube.ServerVersion(ctx); err == nil {
 		req.KubernetesVersion = v
@@ -359,6 +378,7 @@ func (a *Agent) heartbeat(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	a.cfg.Metrics.HeartbeatSucceeded(a.cfg.Now())
 	a.mu.Lock()
 	if !resp.ServerTime.IsZero() {
 		a.clockOffset = resp.ServerTime.Sub(sent)
@@ -398,6 +418,7 @@ func (a *Agent) setHeartbeatOnly() {
 	a.mu.Lock()
 	a.heartbeatOnly = true
 	a.mu.Unlock()
+	a.cfg.Metrics.SetHeartbeatOnly()
 }
 
 func jitter(d time.Duration) time.Duration {
