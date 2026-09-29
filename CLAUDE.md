@@ -23,6 +23,7 @@ descriptions.
 go test -race ./...     # all tests (fake API server and mock backend)
 go vet ./...
 gofmt -l .              # must print nothing
+test/e2e/run.sh         # end-to-end on kind (cluster from test/e2e/kind.yaml)
 go run ./cmd/mock-backend -addr 127.0.0.1:8080
 go run ./cmd/thumbops-agent --dev-insecure --backend-url http://127.0.0.1:8080 --kube-api http://127.0.0.1:8001 --policy-file /tmp/policy.json
 ```
@@ -47,6 +48,7 @@ the mock backend in HTTPS mode). Never on a production cluster.
 | `internal/status` | Cluster status for the dashboard: client-go informers and the summary |
 | `internal/kubefake` | Fake API server for tests |
 | `internal/mockbackend` | Mock backend for tests and development |
+| `test/e2e` | End-to-end tests on kind: `deploy/agent.yaml` against the mock backend with mTLS |
 
 ## client-go and the REST client
 
@@ -99,10 +101,9 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
 
 Done: test on kind with the mock backend, the ServiceAccount's real RBAC and
 registration with mTLS; cluster status with informers, checked on kind
-against the real backend.
+against the real backend; `LICENSE`; CI (GitHub Actions) with lint, tests,
+end-to-end tests on kind and the multi-arch image on ghcr.io.
 
 1. Key and certificate in a Secret managed by the agent instead of a PVC. Decide at the same time whether the agent should re-register by itself when it stops with `ErrUnauthorized` and finds a new bootstrap token (today the state must be wiped by hand).
-2. Helm chart (replaces `deploy/agent.yaml`), liveness/readiness probes, Prometheus metrics.
-3. CI (GitHub Actions): `go test -race`, `go vet`, `gofmt`, end-to-end tests on kind; image build.
-4. Add the `LICENSE` file (Apache 2.0).
-5. Status: events and real usage from metrics-server, when the dashboard needs them (out of the MVP).
+2. Helm chart (replaces `deploy/agent.yaml`, and the e2e kustomization with it), liveness/readiness probes, Prometheus metrics.
+3. Status: events and real usage from metrics-server, when the dashboard needs them (out of the MVP).

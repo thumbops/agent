@@ -1,0 +1,66 @@
+# Mock backend in HTTPS with mTLS, for the end-to-end tests only.
+# The server certificate comes from the mock-backend-tls Secret created by run.sh.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: thumbops-e2e
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-backend
+  namespace: thumbops-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-backend
+  template:
+    metadata:
+      labels:
+        app: mock-backend
+    spec:
+      nodeSelector:
+        thumbops-e2e: infra
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mock-backend
+          image: thumbops/mock-backend:e2e
+          imagePullPolicy: Never
+          args:
+            - -addr=:8443
+            - -tls-cert=/etc/mock-backend/tls.crt
+            - -tls-key=/etc/mock-backend/tls.key
+            - -bootstrap-token=e2e-bootstrap-token
+            # Short validity: the agent renews its certificate during the test.
+            - -cert-lifetime=60s
+          ports:
+            - containerPort: 8443
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/mock-backend
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: mock-backend-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-backend
+  namespace: thumbops-e2e
+spec:
+  selector:
+    app: mock-backend
+  ports:
+    - port: 8443
+      targetPort: 8443
