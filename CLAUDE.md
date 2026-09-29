@@ -23,6 +23,8 @@ descriptions.
 go test -race ./...     # all tests (fake API server and mock backend)
 go vet ./...
 gofmt -l .              # must print nothing
+test/chart/check.sh     # chart lint, render, kubeconform, manifest up to date
+hack/gen-manifest.sh    # regenerate deploy/agent.yaml after a chart change
 test/e2e/run.sh         # end-to-end on kind (cluster from test/e2e/kind.yaml)
 go run ./cmd/mock-backend -addr 127.0.0.1:8080
 go run ./cmd/thumbops-agent --dev-insecure --backend-url http://127.0.0.1:8080 --kube-api http://127.0.0.1:8001 --policy-file /tmp/policy.json
@@ -50,7 +52,10 @@ the mock backend in HTTPS mode). Never on a production cluster.
 | `internal/health` | Liveness and readiness state, HTTP handler for /healthz, /readyz, /metrics |
 | `internal/kubefake` | Fake API server for tests |
 | `internal/mockbackend` | Mock backend for tests and development |
-| `test/e2e` | End-to-end tests on kind: `deploy/agent.yaml` against the mock backend with mTLS |
+| `charts/thumbops-agent` | Helm chart: the source of the installation |
+| `hack` | `gen-manifest.sh`: deploy/agent.yaml from the chart |
+| `test/chart` | Chart checks |
+| `test/e2e` | End-to-end tests on kind: the agent installed with the Helm chart against the mock backend with mTLS |
 
 ## client-go and the REST client
 
@@ -99,6 +104,11 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
 - **The agent can only get and update its identity Secret.** The manifest
   creates it empty; no `create` and no access to other Secrets (checked by
   the end-to-end tests).
+- **`deploy/agent.yaml` is generated.** Change the chart and run
+  `hack/gen-manifest.sh`; `test/chart/check.sh` fails if the committed
+  manifest differs. The identity Secret stays empty in the chart with
+  `helm.sh/resource-policy: keep`, and the agent never gets `create` on
+  Secrets.
 - **The status never blocks the actions.** Without the
   `thumbops-agent-status` RBAC the informers never sync, no status is sent,
   a warning is logged after a minute, and actions keep working; the status
@@ -120,7 +130,7 @@ registration with mTLS; cluster status with informers, checked on kind
 against the real backend; `LICENSE`; identity in a Secret with a new
 registration on a new bootstrap token; CI (GitHub Actions) with lint, tests,
 end-to-end tests on kind and the multi-arch image on ghcr.io; health probes
-and Prometheus metrics.
+and Prometheus metrics; Helm chart (OCI on ghcr.io), deploy/agent.yaml
+generated from it.
 
-1. Helm chart (replaces `deploy/agent.yaml`, and the e2e kustomization with it; the identity Secret must survive upgrades and uninstalls, e.g. `helm.sh/resource-policy: keep`; Service and optional ServiceMonitor for /metrics).
-2. Status: events and real usage from metrics-server, when the dashboard needs them (out of the MVP).
+1. Status: events and real usage from metrics-server, when the dashboard needs them (out of the MVP).
