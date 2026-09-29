@@ -160,6 +160,10 @@ spec:
     metadata:
       labels:
         app: thumbops-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: thumbops-agent
       securityContext:
@@ -175,6 +179,18 @@ spec:
             - --backend-url=https://agent.thumbops.mobiletechnologies.cloud
             - --policy-file=/etc/thumbops/policy/policy.json
             - --bootstrap-token-file=/etc/thumbops/bootstrap/token
+          ports:
+            - name: http
+              containerPort: 9090
+          # Liveness only asks the agent: the real threshold (heartbeat loop
+          # stuck for max(5 × interval, 5 min)) is computed there.
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
           resources:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 128Mi }

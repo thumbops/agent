@@ -62,6 +62,34 @@ There are five actions: `rollout-restart`, `scale`, `cordon`, `uncordon`,
   response: the agent stops as it does for a `401` instead of retrying
   forever.
 
+## Health and metrics
+
+`--http-addr` (default `:9090`, empty = disabled) serves, without
+authentication:
+
+- `/healthz`: `503` when the heartbeat loop has not completed an attempt for
+  `max(5 × --heartbeat-interval, 5 min)`. A failed heartbeat still counts:
+  the probe never restarts the agent because the backend or the network is
+  down.
+- `/readyz`: `200` once policy and identity are loaded and the main loop has
+  started; it never goes back to `503`.
+- `/metrics`: Prometheus metrics, prefix `thumbops_agent_`, with no resource
+  names in the labels, plus the standard `go_*` and `process_*` metrics.
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `info` | `version` | Always 1 |
+| `backend_requests_total` | `operation`, `code` | Backend calls; `code` is the HTTP status or `error` |
+| `heartbeat_last_success_timestamp_seconds` | | Alert here for "backend unreachable" |
+| `heartbeat_only` | | 1 after a `426`: upgrade the agent |
+| `actions_total` | `type`, `outcome` | `succeeded`, `failed`, `rejected`, `expired`, `discarded` |
+| `action_duration_seconds` | `type` | Execution time (histogram) |
+| `action_in_progress` | | 1 while an action runs |
+| `certificate_expiry_timestamp_seconds` | | Expiry of the certificate in use |
+| `certificate_renewals_total` | `result` | `success` or `error` |
+| `status_ready` | | 0 until the status informers sync (e.g. missing RBAC) or with `--status=false` |
+| `status_last_sent_timestamp_seconds` | | Last cluster status accepted by the backend |
+
 ## Layout
 
 ```
@@ -76,6 +104,8 @@ internal/identity    Ed25519 key, CSR, certificate; stored in a Secret or a dire
 internal/enroll      registration and renewal
 internal/agent       main loop
 internal/status      cluster status: informers and summary
+internal/metrics     Prometheus metrics (private registry)
+internal/health      liveness and readiness probes
 internal/kubefake    fake API server (tests)
 internal/mockbackend mock backend (tests and development)
 deploy/agent.yaml    manifest: RBAC (actions and status), policy, Deployment
@@ -182,7 +212,6 @@ curl --cacert /tmp/server.crt https://127.0.0.1:8443/debug/actions
 
 ## Missing for production
 
-- Prometheus metrics for the agent and liveness probes.
 - Intermediate results for long drains (an open question in the protocol).
 
 ## License
