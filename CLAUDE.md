@@ -108,6 +108,8 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
   requests still count in the aggregates, which carry no names).
 - **Liveness never depends on the backend.** `/healthz` fails only when the
   heartbeat loop stops making attempts; a failed heartbeat still counts.
+  It never fails before readiness (startup, registration retries): a restart
+  there could lose the single-use bootstrap token.
   Readiness never goes back to `503`. Otherwise a backend outage would make
   Kubernetes restart the agent in a loop, interrupting actions.
 

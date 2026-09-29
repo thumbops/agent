@@ -24,6 +24,7 @@ func TestLivenessThreshold(t *testing.T) {
 func TestLiveness(t *testing.T) {
 	c := &clock{t: time.Unix(1000, 0)}
 	s := New(5*time.Minute, c.now)
+	s.MarkReady()
 	if err := s.Live(); err != nil {
 		t.Fatalf("at start: %v", err)
 	}
@@ -34,6 +35,34 @@ func TestLiveness(t *testing.T) {
 	s.HeartbeatAttempted() // a failed attempt counts too
 	if err := s.Live(); err != nil {
 		t.Fatalf("after an attempt: %v", err)
+	}
+}
+
+func TestLivenessIgnoresStartup(t *testing.T) {
+	c := &clock{t: time.Unix(1000, 0)}
+	s := New(5*time.Minute, c.now)
+	c.t = c.t.Add(time.Hour)
+	if err := s.Live(); err != nil {
+		t.Fatalf("not ready yet, liveness must not fail: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	Handler(s, http.NotFoundHandler()).ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	if rec.Code != 200 {
+		t.Fatalf("/healthz before readiness: %d", rec.Code)
+	}
+}
+
+func TestMarkReadyResetsLivenessClock(t *testing.T) {
+	c := &clock{t: time.Unix(1000, 0)}
+	s := New(5*time.Minute, c.now)
+	c.t = c.t.Add(10 * time.Minute)
+	s.MarkReady()
+	if err := s.Live(); err != nil {
+		t.Fatalf("right after MarkReady: %v", err)
+	}
+	c.t = c.t.Add(5*time.Minute + time.Second)
+	if err := s.Live(); err == nil {
+		t.Fatal("no attempt past the threshold since MarkReady must fail")
 	}
 }
 
@@ -85,4 +114,10 @@ func TestNilIsSafe(t *testing.T) {
 	var s *State
 	s.HeartbeatAttempted()
 	s.MarkReady()
+	if err := s.Live(); err != nil {
+		t.Fatalf("nil Live: %v", err)
+	}
+	if !s.Ready() {
+		t.Fatal("nil Ready must be true")
+	}
 }

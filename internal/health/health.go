@@ -1,6 +1,9 @@
 // Package health answers the Kubernetes probes. Liveness depends only on
 // the heartbeat loop making progress, never on the backend being reachable:
-// restarting the agent does not fix the network.
+// restarting the agent does not fix the network. Liveness never fails before
+// the agent is ready: startup, including registration and its save retries,
+// is not judged, because a restart there could lose a single-use bootstrap
+// token.
 package health
 
 import (
@@ -10,7 +13,10 @@ import (
 	"time"
 )
 
-// LivenessThreshold is max(5 × heartbeat interval, 5 min).
+// LivenessThreshold is max(5 × heartbeat interval, 5 min). One heartbeat
+// attempt runs several sequential API server calls (permission checks,
+// version, nodes) and backend calls, each with a 30 s timeout, so the worst
+// case is about 4-5 minutes: the 5-minute floor must stay above that.
 func LivenessThreshold(heartbeatInterval time.Duration) time.Duration {
 	return max(5*heartbeatInterval, 5*time.Minute)
 }
@@ -26,8 +32,8 @@ type State struct {
 	ready       bool
 }
 
-// New starts the liveness clock now: the process start counts as the last
-// heartbeat attempt until the first one completes.
+// New returns a State that is not ready. The liveness clock only starts at
+// MarkReady.
 func New(threshold time.Duration, now func() time.Time) *State {
 	if now == nil {
 		now = time.Now
@@ -45,27 +51,42 @@ func (s *State) HeartbeatAttempted() {
 	s.mu.Unlock()
 }
 
-// MarkReady records that startup is complete; readiness never goes back.
+// MarkReady records that startup is complete; readiness never goes back. It
+// also resets the liveness clock, so the threshold counts from the end of
+// startup.
 func (s *State) MarkReady() {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	s.ready = true
+	s.lastAttempt = s.now()
 	s.mu.Unlock()
 }
 
-// Live returns an error when the heartbeat loop is stuck.
+// Live returns an error when the heartbeat loop is stuck. It returns nil
+// while the state is not ready (startup is never judged by liveness) and on
+// a nil receiver.
 func (s *State) Live() error {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.ready {
+		return nil
+	}
 	if since := s.now().Sub(s.lastAttempt); since > s.threshold {
 		return fmt.Errorf("no heartbeat attempt for %s (threshold %s)", since.Round(time.Second), s.threshold)
 	}
 	return nil
 }
 
+// Ready reports whether startup is complete. A nil State is always ready.
 func (s *State) Ready() bool {
+	if s == nil {
+		return true
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ready

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -77,9 +78,15 @@ func main() {
 	if *httpAddr != "" {
 		// Started before registration: liveness answers while the agent
 		// registers, readiness answers 503 until Run starts.
-		srv := &http.Server{Addr: *httpAddr, Handler: health.Handler(hs, m.Handler()), ReadHeaderTimeout: 5 * time.Second}
+		// Bound synchronously: a port conflict must fail the process before
+		// registration can consume the single-use bootstrap token.
+		ln, err := net.Listen("tcp", *httpAddr)
+		if err != nil {
+			fatal("health and metrics server: %v", err)
+		}
+		srv := &http.Server{Handler: health.Handler(hs, m.Handler()), ReadHeaderTimeout: 5 * time.Second}
 		go func() {
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fatal("health and metrics server: %v", err)
 			}
 		}()

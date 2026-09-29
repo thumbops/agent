@@ -24,15 +24,20 @@ NetworkPolicy.
   authentication. The metrics carry no resource names (no namespaces, nodes
   or deployments) and nothing sensitive.
 - It is separate from the backend connection, which stays outbound only.
-- It starts **before** registration, so the liveness probe answers while the
-  agent registers; readiness answers `503` until startup is complete.
+- It starts **before** registration (and binds synchronously, so a port
+  conflict fails the process before registration can consume the bootstrap
+  token); the liveness probe answers `200` while the agent registers, and
+  readiness answers `503` until startup is complete.
 - It shuts down with the agent's context.
 
 ## Liveness: `/healthz`
 
-- `503` if the heartbeat loop has not completed an attempt for more than
-  `max(5 × heartbeat-interval, 5 min)`. Before the first attempt, the
-  process start time counts as the last attempt.
+- Always `200` until readiness: startup, including registration and its save
+  retries, is never judged by liveness, because a restart there could lose a
+  single-use bootstrap token.
+- Once ready, `503` if the heartbeat loop has not completed an attempt for
+  more than `max(5 × heartbeat-interval, 5 min)`. The threshold counts from
+  the moment the agent becomes ready, then from each heartbeat attempt.
 - An attempt counts whatever its outcome: a heartbeat that fails because the
   backend is unreachable still proves the loop is alive. Every backend and
   API server call already has a timeout, so a hung call cannot keep the loop

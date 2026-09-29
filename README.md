@@ -67,7 +67,9 @@ There are five actions: `rollout-restart`, `scale`, `cordon`, `uncordon`,
 `--http-addr` (default `:9090`, empty = disabled) serves, without
 authentication:
 
-- `/healthz`: `503` when the heartbeat loop has not completed an attempt for
+- `/healthz`: always `200` until the agent is ready (startup and registration
+  retries are never judged, so a restart cannot lose the bootstrap token);
+  afterwards `503` when the heartbeat loop has not completed an attempt for
   `max(5 × --heartbeat-interval, 5 min)`. A failed heartbeat still counts:
   the probe never restarts the agent because the backend or the network is
   down.

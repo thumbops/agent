@@ -95,7 +95,7 @@ metric() {
 }
 
 agent_restarts() {
-  kubectl -n thumbops get pods -l app=thumbops-agent -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'
+  kubectl -n thumbops get pods -l app=thumbops-agent --field-selector=status.phase=Running -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'
 }
 
 log "building and loading the images"

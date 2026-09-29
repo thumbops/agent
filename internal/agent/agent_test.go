@@ -497,7 +497,14 @@ func TestHeartbeatMetricsAndHealth(t *testing.T) {
 		t.Fatal("ready before Run")
 	}
 	stop := e.run(t)
-	time.Sleep(200 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	for body := scrape(t, m); !strings.Contains(body, "thumbops_agent_heartbeat_only 1") || strings.Contains(body, "thumbops_agent_heartbeat_last_success_timestamp_seconds 0\n"); body = scrape(t, m) {
+		if time.Now().After(deadline) {
+			stop()
+			t.Fatal("heartbeat_only never became 1")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
@@ -518,6 +525,7 @@ func TestHeartbeatAttemptKeepsLivenessWhenBackendIsDown(t *testing.T) {
 	hs := health.New(time.Minute, func() time.Time { return now })
 	e := newEnv(t, nil, func(c *Config) { c.Health = hs })
 	e.mb.SetHeartbeatStatus(http.StatusServiceUnavailable)
+	hs.MarkReady()                 // liveness is only judged once the agent is ready
 	now = now.Add(2 * time.Minute) // past the threshold
 	if err := e.agent.heartbeat(context.Background()); err == nil {
 		t.Fatal("expected the heartbeat to fail")
