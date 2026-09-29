@@ -11,6 +11,7 @@ import (
 
 	"github.com/thumbops/agent/internal/backend"
 	"github.com/thumbops/agent/internal/identity"
+	"github.com/thumbops/agent/internal/metrics"
 	"github.com/thumbops/agent/internal/protocol"
 )
 
@@ -24,6 +25,7 @@ type Enroller struct {
 	Store   identity.Store
 	Holder  *identity.Holder
 	Logger  *slog.Logger
+	Metrics *metrics.Metrics // optional
 	// SaveBackoff is the first wait between attempts to save the identity
 	// after a registration (default 1s, doubled up to 30s).
 	SaveBackoff time.Duration
@@ -115,6 +117,7 @@ func (e *Enroller) activate(st *identity.State) error {
 	}
 	e.state = st
 	e.Holder.Set(cert)
+	e.Metrics.CertificateInUse(cert.Leaf.NotAfter)
 	e.Backend.ResetConnections()
 	return nil
 }
@@ -134,22 +137,28 @@ func (e *Enroller) Renew(ctx context.Context, now time.Time) (bool, error) {
 	if e.state == nil || cur == nil || cur.Leaf == nil || !identity.NeedsRenewal(cur.Leaf, now) {
 		return false, nil
 	}
+	err := e.renew(ctx)
+	e.Metrics.CertificateRenewal(err)
+	return err == nil, err
+}
+
+func (e *Enroller) renew(ctx context.Context) error {
 	csr, err := identity.CSR(e.state.Key)
 	if err != nil {
-		return false, err
+		return err
 	}
 	resp, err := e.Backend.RenewCertificate(ctx, csr)
 	if err != nil {
-		return false, err
+		return err
 	}
 	next := *e.state
 	next.CertPEM = resp.Certificate
 	// Saved first: if saving fails the old certificate stays in use and on
 	// disk, and the renewal is tried again at the next heartbeat.
 	if err := e.Store.Save(ctx, &next); err != nil {
-		return false, err
+		return err
 	}
-	return true, e.activate(&next)
+	return e.activate(&next)
 }
 
 func (e *Enroller) logger() *slog.Logger {
