@@ -139,10 +139,12 @@ HTTPS with mTLS. It then checks registration, scale,
 rollout-restart, cordon, drain, uncordon, two policy rejections, a
 certificate renewal, the agent's permissions on Secrets, the identity kept
 across a restart and a new registration with a new bootstrap token. It also
-covers `helm upgrade`, uninstall and reinstall keeping the identity. The script refuses to run unless the kubectl context is
-`kind-thumbops-e2e`.
+covers `helm upgrade`, uninstall and reinstall keeping the identity. The
+script refuses to run unless `KUBECONFIG` points to a dedicated file (see
+"Trying it on a kind cluster") and its context is `kind-thumbops-e2e`.
 
 ```
+export KUBECONFIG="$PWD/.kind-kubeconfig"   # a dedicated file, never ~/.kube/config
 kind create cluster --name thumbops-e2e --config test/e2e/kind.yaml
 test/e2e/run.sh
 kind delete cluster --name thumbops-e2e
@@ -199,7 +201,15 @@ The identity Secret stays, so the agent keeps its identity.
 
 You need a test cluster: **never use a production cluster.**
 
+Always create kind clusters with `KUBECONFIG` pointing to a dedicated file.
+`kind create cluster` writes its context into the kubeconfig in use and makes
+it the current one, and `kind delete cluster` leaves no current context:
+with the default `~/.kube/config` this silently redirects, or breaks, any
+other kubectl session. `.kind-kubeconfig` is git-ignored; export it in every
+shell that talks to the kind cluster.
+
 ```
+export KUBECONFIG="$PWD/.kind-kubeconfig"
 kind create cluster --name thumbops
 kubectl create deployment web --image=nginx --replicas=2
 

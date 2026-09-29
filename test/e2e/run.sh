@@ -2,15 +2,21 @@
 # End-to-end test on kind: the agent installed with the Helm chart (real
 # RBAC) registers with the mock backend over mTLS, runs approved actions,
 # rejects the ones outside the policy, renews its certificate, exposes health
-# probes and metrics, keeps its identity (in a Secret) across restarts, survives helm upgrade,
-# uninstall and reinstall with its identity, and registers again with a new
-# bootstrap token.
+# probes and metrics, keeps its identity (in a Secret) across restarts,
+# survives helm upgrade, uninstall and reinstall with its identity, and
+# registers again with a new bootstrap token.
 #
+#   export KUBECONFIG="$PWD/.kind-kubeconfig"
 #   kind create cluster --name thumbops-e2e --config test/e2e/kind.yaml
 #   test/e2e/run.sh
+#   kind delete cluster --name thumbops-e2e
 #
-# KIND_CLUSTER selects the cluster (default thumbops-e2e). The script uses the
-# current kubectl context: it refuses to run unless it is kind-$KIND_CLUSTER.
+# KUBECONFIG must point to a dedicated file, never ~/.kube/config: kind
+# switches the current context of the file it writes to, and clears it on
+# delete, which would break whatever else is using kubectl meanwhile. In CI
+# (CI=true, a throwaway runner) the default kubeconfig is accepted.
+# KIND_CLUSTER selects the cluster (default thumbops-e2e). The script refuses
+# to run unless the current context of that file is kind-$KIND_CLUSTER.
 # Never point it at a real cluster.
 set -euo pipefail
 
@@ -21,6 +27,13 @@ work=$(mktemp -d)
 pf_pid=""
 agent_pf_pid=""
 
+if [[ ${CI:-} != true ]]; then
+  if [[ -z ${KUBECONFIG:-} || $KUBECONFIG == *:* || $KUBECONFIG -ef "$HOME/.kube/config" ]]; then
+    echo "set KUBECONFIG to a dedicated file, e.g. export KUBECONFIG=\"\$PWD/.kind-kubeconfig\"," >&2
+    echo "and create the kind cluster with it: never use ~/.kube/config" >&2
+    exit 1
+  fi
+fi
 if [[ $(kubectl config current-context) != "kind-$KIND_CLUSTER" ]]; then
   echo "the current kubectl context is not kind-$KIND_CLUSTER: refusing to run" >&2
   exit 1
