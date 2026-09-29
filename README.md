@@ -67,6 +67,7 @@ internal/status      cluster status: informers and summary
 internal/kubefake    fake API server (tests)
 internal/mockbackend mock backend (tests and development)
 deploy/agent.yaml    manifest: RBAC (actions and status), policy, Deployment
+test/e2e             end-to-end tests on kind
 ```
 
 ## Tests
@@ -81,6 +82,26 @@ controller, drain timeout, policy rejections, control plane nodes, expired
 actions, already claimed actions, clock skew, result retries, 401, 426,
 backend unavailability, registration, single-use tokens, mTLS, certificate
 renewal and rejected certificates.
+
+### End-to-end tests on kind
+
+`test/e2e/run.sh` installs the agent with `deploy/agent.yaml` (the real RBAC
+and security context, only the image, backend URL and intervals changed) next
+to the mock backend in HTTPS with mTLS. It then checks registration, scale,
+rollout-restart, cordon, drain, uncordon, two policy rejections and a
+certificate renewal. The script refuses to run unless the kubectl context is
+`kind-thumbops-e2e`.
+
+```
+kind create cluster --name thumbops-e2e --config test/e2e/kind.yaml
+test/e2e/run.sh
+kind delete cluster --name thumbops-e2e
+```
+
+CI (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `go test -race` and
+the end-to-end tests on every pull request, and builds the multi-arch image.
+Pushes to `main` publish `ghcr.io/thumbops/agent:edge`, and `v*` tags publish
+the version.
 
 ## Trying it on a kind cluster
 
@@ -149,5 +170,8 @@ curl --cacert /tmp/server.crt https://127.0.0.1:8443/debug/actions
 
 - Key and certificate in a Secret instead of a volume.
 - Prometheus metrics for the agent and liveness probes.
-- Tests on real clusters (kind in CI) besides the ones with the fake API.
 - Intermediate results for long drains (an open question in the protocol).
+
+## License
+
+Apache 2.0, see [LICENSE](LICENSE).

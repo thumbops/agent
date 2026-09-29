@@ -1,0 +1,15 @@
+# Mock backend image, for the end-to-end tests on kind only.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -o /out/mock-backend ./cmd/mock-backend
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/mock-backend /mock-backend
+USER 65532:65532
+ENTRYPOINT ["/mock-backend"]

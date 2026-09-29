@@ -1,0 +1,13 @@
+# kind cluster for the end-to-end tests: the agent and the mock backend are
+# pinned to the "infra" worker, so the drain of the other worker never
+# evicts them.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      thumbops-e2e: infra
+  - role: worker
+    labels:
+      thumbops-e2e: workload
