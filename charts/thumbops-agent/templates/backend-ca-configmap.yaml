@@ -1,0 +1,12 @@
+{{- if .Values.backend.caBundle }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "thumbops-agent.fullname" . }}-backend-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+data:
+  ca.crt: |
+    {{- .Values.backend.caBundle | trim | nindent 4 }}
+{{- end }}

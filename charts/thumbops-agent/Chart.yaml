@@ -1,0 +1,9 @@
+apiVersion: v2
+name: thumbops-agent
+description: ThumbOps agent, runs approved actions in the cluster within its local policy
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/thumbops/agent
+sources:
+  - https://github.com/thumbops/agent

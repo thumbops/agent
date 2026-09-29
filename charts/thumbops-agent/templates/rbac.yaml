@@ -1,0 +1,127 @@
+{{- $fullname := include "thumbops-agent.fullname" . -}}
+# Always needed: cluster identification at registration (kube-system UID)
+# and the node counts in the heartbeat.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-base
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["kube-system"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-base
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-base
+subjects:
+  {{- include "thumbops-agent.subjects" . | nindent 2 }}
+{{- if .Values.rbac.actions }}
+---
+# Only what the five actions need.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-actions
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+rules:
+  # rollout-restart and scale
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  # cordon, uncordon, drain
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+  # drain: listing the pods on the node and eviction (honors PodDisruptionBudgets)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-actions
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-actions
+subjects:
+  {{- include "thumbops-agent.subjects" . | nindent 2 }}
+{{- end }}
+{{- if .Values.rbac.status }}
+---
+# Cluster status for the dashboard: read-only, watched through informers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-status
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-status
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-status
+subjects:
+  {{- include "thumbops-agent.subjects" . | nindent 2 }}
+{{- end }}
+---
+# The agent reads and updates only the Secret holding its identity.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-identity
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.identity.secretName | quote }}]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-identity
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-identity
+subjects:
+  {{- include "thumbops-agent.subjects" . | nindent 2 }}

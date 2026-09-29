@@ -1,0 +1,15 @@
+The ThumbOps agent is installed in the {{ .Release.Namespace }} namespace.
+
+{{- if not (or .Values.bootstrap.token .Values.bootstrap.existingSecret) }}
+
+No bootstrap token was given: the agent starts only if it already has an
+identity in the {{ .Values.identity.secretName }} Secret. To register it:
+
+  helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reuse-values --set bootstrap.token=<SINGLE-USE TOKEN>
+{{- end }}
+
+Logs:    kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "thumbops-agent.fullname" . }}
+Health:  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "thumbops-agent.fullname" . }} {{ .Values.http.port }} && curl localhost:{{ .Values.http.port }}/metrics
+
+The {{ .Values.identity.secretName }} Secret is kept on uninstall: reinstall
+with the same release name in this namespace to keep the agent's identity.

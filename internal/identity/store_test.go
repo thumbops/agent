@@ -90,7 +90,7 @@ func TestSecretStoreWithoutSecret(t *testing.T) {
 		"load": func() error { _, err := s.Load(context.Background()); return err }(),
 		"save": s.Save(context.Background(), testState(t, "t")),
 	} {
-		if err == nil || !strings.Contains(err.Error(), "created empty by the manifest") {
+		if err == nil || !strings.Contains(err.Error(), "created empty by the Helm chart") {
 			t.Fatalf("%s without the Secret: %v", name, err)
 		}
 	}

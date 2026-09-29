@@ -1,41 +1,140 @@
-# ThumbOps agent installation (prototype).
+# ThumbOps agent installation without Helm.
+#
+# GENERATED from charts/thumbops-agent by hack/gen-manifest.sh: do not edit,
+# change the chart and run the script again.
 #
 #   kubectl apply -f deploy/agent.yaml
 #   kubectl -n thumbops create secret generic thumbops-bootstrap --from-literal=token=<SINGLE-USE TOKEN>
 #
-# Two ClusterRoles: thumbops-agent-actions grants only what the five actions
-# need; thumbops-agent-status is read-only, for the dashboard's cluster status.
-# The Role thumbops-agent-identity lets the agent read and update only the
-# Secret holding its key and certificate.
+# ClusterRoles: thumbops-agent-base (always needed: kube-system UID at
+# registration, node counts in the heartbeat), thumbops-agent-actions (only
+# what the five actions need), thumbops-agent-status (read-only, for the
+# dashboard's cluster status). The Role thumbops-agent-identity lets the agent
+# read and update only the Secret holding its key and certificate.
 #
 # To register again (cluster revoked, certificate expired), put a new
 # single-use token in thumbops-bootstrap and restart the agent: a token
 # different from the one used for the saved identity triggers a new
-# registration.
-# To install the agent for the dashboard only, drop the actions ClusterRole
-# and binding and leave "allowed_actions" empty in the policy; to install it
-# without the dashboard, drop the status ones and run it with --status=false.
+# registration. For other options (dashboard only, no actions, backend CA,
+# metrics Service) install with Helm: see charts/thumbops-agent/README.md.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: thumbops
 ---
+# Source: thumbops-agent/templates/serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: thumbops-agent
   namespace: thumbops
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+
 ---
+# Source: thumbops-agent/templates/identity-secret.yaml
+# Agent identity: private key and certificate. Created empty and filled by
+# the agent, which has no permission to create Secrets. Upgrades never touch
+# its data and uninstall keeps it: a new install with the same release name
+# in the same namespace adopts it and the agent keeps its identity.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: thumbops-agent-identity
+  namespace: thumbops
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+
+---
+# Source: thumbops-agent/templates/policy-configmap.yaml
+# Local policy: managed by the cluster team, not by the backend.
+# An action outside the policy is rejected even if approved in the app.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: thumbops-agent-policy
+  namespace: thumbops
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+data:
+  policy.json: |
+    {
+      "allow_control_plane_nodes": false,
+      "allow_delete_emptydir_data": false,
+      "allowed_actions": [
+        "rollout-restart",
+        "scale",
+        "cordon",
+        "uncordon",
+        "drain"
+      ],
+      "denied_namespaces": [
+        "kube-system",
+        "thumbops"
+      ],
+      "max_replicas": 20,
+      "status": {
+        "exclude_namespaces": []
+      }
+    }
+
+---
+# Source: thumbops-agent/templates/rbac.yaml
+# Always needed: cluster identification at registration (kube-system UID)
+# and the node counts in the heartbeat.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: thumbops-agent-base
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["kube-system"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+
+---
+# Source: thumbops-agent/templates/rbac.yaml
+# Only what the five actions need.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: thumbops-agent-actions
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
 rules:
   # rollout-restart and scale
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "patch"]
-  # cordon, uncordon, drain; reading nodes for the heartbeat
+  # cordon, uncordon, drain
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "patch"]
@@ -46,16 +145,61 @@ rules:
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]
-  # cluster identification at registration (kube-system UID)
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    resourceNames: ["kube-system"]
-    verbs: ["get"]
+
 ---
+# Source: thumbops-agent/templates/rbac.yaml
+# Cluster status for the dashboard: read-only, watched through informers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: thumbops-agent-status
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+
+---
+# Source: thumbops-agent/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: thumbops-agent-base
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: thumbops-agent-base
+subjects:
+  - kind: ServiceAccount
+    name: thumbops-agent
+    namespace: thumbops
+
+---
+# Source: thumbops-agent/templates/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: thumbops-agent-actions
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -64,33 +208,61 @@ subjects:
   - kind: ServiceAccount
     name: thumbops-agent
     namespace: thumbops
+
 ---
-# Agent identity: private key and certificate. Created empty here and filled
-# by the agent, so it needs no permission to create Secrets. Applying this
-# manifest again does not erase what the agent wrote.
-apiVersion: v1
-kind: Secret
+# Source: thumbops-agent/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
 metadata:
-  name: thumbops-agent-identity
-  namespace: thumbops
-type: Opaque
+  name: thumbops-agent-status
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: thumbops-agent-status
+subjects:
+  - kind: ServiceAccount
+    name: thumbops-agent
+    namespace: thumbops
+
 ---
+# Source: thumbops-agent/templates/rbac.yaml
+# The agent reads and updates only the Secret holding its identity.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: thumbops-agent-identity
   namespace: thumbops
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: ["thumbops-agent-identity"]
     verbs: ["get", "update"]
+
 ---
+# Source: thumbops-agent/templates/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: thumbops-agent-identity
   namespace: thumbops
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -99,106 +271,84 @@ subjects:
   - kind: ServiceAccount
     name: thumbops-agent
     namespace: thumbops
+
 ---
-# Cluster status for the dashboard: read-only, watched through informers.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: thumbops-agent-status
-rules:
-  - apiGroups: [""]
-    resources: ["nodes", "pods"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: thumbops-agent-status
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: thumbops-agent-status
-subjects:
-  - kind: ServiceAccount
-    name: thumbops-agent
-    namespace: thumbops
----
-# Local policy: managed by the cluster team, not by the backend.
-# An action outside the policy is rejected even if approved in the app.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: thumbops-policy
-  namespace: thumbops
-data:
-  policy.json: |
-    {
-      "allowed_actions": ["rollout-restart", "scale", "cordon", "uncordon", "drain"],
-      "denied_namespaces": ["kube-system", "thumbops"],
-      "max_replicas": 20,
-      "allow_delete_emptydir_data": false,
-      "allow_control_plane_nodes": false,
-      "status": { "exclude_namespaces": [] }
-    }
----
+# Source: thumbops-agent/templates/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: thumbops-agent
   namespace: thumbops
+  labels:
+    helm.sh/chart: thumbops-agent-0.1.0
+    app.kubernetes.io/name: thumbops-agent
+    app.kubernetes.io/instance: thumbops-agent
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1 # a single agent per cluster
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: thumbops-agent
+      app.kubernetes.io/name: thumbops-agent
+      app.kubernetes.io/instance: thumbops-agent
   template:
     metadata:
       labels:
-        app: thumbops-agent
+        app.kubernetes.io/name: thumbops-agent
+        app.kubernetes.io/instance: thumbops-agent
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
+        # The agent reads the policy at startup: restart it when it changes.
+        checksum/policy: 1493ecf5910c2e25406401f225fbd31d88b5fe1f1ccd48b1183d175b4ce4ddbd
         prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
+        prometheus.io/scrape: "true"
     spec:
       serviceAccountName: thumbops-agent
       securityContext:
+        fsGroup: 65532
         runAsNonRoot: true
         runAsUser: 65532
-        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: ghcr.io/thumbops/agent:0.1.0 # replace with your own image
+          image: "ghcr.io/thumbops/agent:0.1.0"
+          imagePullPolicy: IfNotPresent
           args:
             - --backend-url=https://agent.thumbops.mobiletechnologies.cloud
             - --policy-file=/etc/thumbops/policy/policy.json
             - --bootstrap-token-file=/etc/thumbops/bootstrap/token
+            - --state-secret=thumbops-agent-identity
+            - --http-addr=:9090
+            - --log-level=info
           ports:
             - name: http
               containerPort: 9090
-          # Liveness only asks the agent: the real threshold (heartbeat loop
-          # stuck for max(5 × interval, 5 min)) is computed there.
           livenessProbe:
-            httpGet: { path: /healthz, port: http }
-            periodSeconds: 30
             failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
           readinessProbe:
-            httpGet: { path: /readyz, port: http }
+            httpGet:
+              path: /readyz
+              port: http
             periodSeconds: 5
           resources:
-            requests: { cpu: 10m, memory: 32Mi }
-            limits: { memory: 128Mi }
+            limits:
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
             capabilities:
-              drop: ["ALL"]
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
           volumeMounts:
             - name: policy
               mountPath: /etc/thumbops/policy
@@ -209,7 +359,7 @@ spec:
       volumes:
         - name: policy
           configMap:
-            name: thumbops-policy
+            name: thumbops-agent-policy
         - name: bootstrap
           secret:
             secretName: thumbops-bootstrap

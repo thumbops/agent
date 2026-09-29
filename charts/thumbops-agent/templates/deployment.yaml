@@ -1,0 +1,113 @@
+{{- $fullname := include "thumbops-agent.fullname" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+spec:
+  replicas: 1 # a single agent per cluster
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "thumbops-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "thumbops-agent.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # The agent reads the policy at startup: restart it when it changes.
+        checksum/policy: {{ include "thumbops-agent.policy" . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $fullname }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --backend-url={{ .Values.backend.url }}
+            - --policy-file=/etc/thumbops/policy/policy.json
+            - --bootstrap-token-file=/etc/thumbops/bootstrap/{{ .Values.bootstrap.key }}
+            - --state-secret={{ .Values.identity.secretName }}
+            - --http-addr=:{{ .Values.http.port }}
+            - --log-level={{ .Values.logLevel }}
+            {{- if .Values.backend.caBundle }}
+            - --backend-ca-file=/etc/thumbops/backend-ca/ca.crt
+            {{- end }}
+            {{- if not .Values.rbac.status }}
+            - --status=false
+            {{- end }}
+            {{- with .Values.heartbeatInterval }}
+            - --heartbeat-interval={{ . }}
+            {{- end }}
+            {{- with .Values.statusInterval }}
+            - --status-interval={{ . }}
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.http.port }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: policy
+              mountPath: /etc/thumbops/policy
+              readOnly: true
+            - name: bootstrap
+              mountPath: /etc/thumbops/bootstrap
+              readOnly: true
+            {{- if .Values.backend.caBundle }}
+            - name: backend-ca
+              mountPath: /etc/thumbops/backend-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: policy
+          configMap:
+            name: {{ $fullname }}-policy
+        - name: bootstrap
+          secret:
+            secretName: {{ include "thumbops-agent.bootstrapSecret" . }}
+            optional: true # needed only to register
+        {{- if .Values.backend.caBundle }}
+        - name: backend-ca
+          configMap:
+            name: {{ $fullname }}-backend-ca
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

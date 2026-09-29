@@ -53,7 +53,7 @@ func (s SecretStore) Save(ctx context.Context, st *State) error {
 
 func (s SecretStore) wrap(err error) error {
 	if apierrors.IsNotFound(err) {
-		return fmt.Errorf("Secret %s/%s not found: it is created empty by the manifest (see deploy/agent.yaml)", s.Namespace, s.Name)
+		return fmt.Errorf("Secret %s/%s not found: it is created empty by the Helm chart (or deploy/agent.yaml)", s.Namespace, s.Name)
 	}
 	return fmt.Errorf("Secret %s/%s: %w", s.Namespace, s.Name, err)
 }
