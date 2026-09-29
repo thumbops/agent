@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/thumbops/agent/internal/metrics"
 	"github.com/thumbops/agent/internal/protocol"
 )
 
@@ -65,20 +66,22 @@ func certificateRejected(err error) bool {
 }
 
 type Options struct {
-	BaseURL   string      // e.g. https://agent.thumbops.mobiletechnologies.cloud
-	TLS       *tls.Config // client certificate (mTLS) and server CA; nil = default
-	UserAgent string      // e.g. thumbops-agent/0.1.0
+	BaseURL   string           // e.g. https://agent.thumbops.mobiletechnologies.cloud
+	TLS       *tls.Config      // client certificate (mTLS) and server CA; nil = default
+	UserAgent string           // e.g. thumbops-agent/0.1.0
+	Metrics   *metrics.Metrics // optional: counts every call
 }
 
 type Client struct {
 	base      string
 	userAgent string
 	tlsConfig *tls.Config
+	metrics   *metrics.Metrics
 	http      atomic.Pointer[http.Client]
 }
 
 func New(o Options) *Client {
-	c := &Client{base: strings.TrimRight(o.BaseURL, "/"), userAgent: o.UserAgent, tlsConfig: o.TLS}
+	c := &Client{base: strings.TrimRight(o.BaseURL, "/"), userAgent: o.UserAgent, tlsConfig: o.TLS, metrics: o.Metrics}
 	c.http.Store(c.newHTTPClient())
 	return c
 }
@@ -103,7 +106,7 @@ func (c *Client) ResetConnections() {
 
 const defaultTimeout = 30 * time.Second
 
-func (c *Client) do(ctx context.Context, method, path, bearer string, timeout time.Duration, in, out any) (int, error) {
+func (c *Client) do(ctx context.Context, op, method, path, bearer string, timeout time.Duration, in, out any) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var rd io.Reader
@@ -130,8 +133,10 @@ func (c *Client) do(ctx context.Context, method, path, bearer string, timeout ti
 	}
 	resp, err := c.http.Load().Do(req)
 	if err != nil {
+		c.metrics.BackendRequest(op, 0)
 		return 0, err
 	}
+	c.metrics.BackendRequest(op, resp.StatusCode)
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
@@ -151,7 +156,7 @@ func (c *Client) do(ctx context.Context, method, path, bearer string, timeout ti
 // Register authenticates with the single-use bootstrap token and obtains the certificate.
 func (c *Client) Register(ctx context.Context, bootstrapToken string, req protocol.RegisterRequest) (*protocol.RegisterResponse, error) {
 	var out protocol.RegisterResponse
-	if _, err := c.do(ctx, http.MethodPost, "/v1/register", bootstrapToken, defaultTimeout, req, &out); err != nil {
+	if _, err := c.do(ctx, metrics.OpRegister, http.MethodPost, "/v1/register", bootstrapToken, defaultTimeout, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -160,7 +165,7 @@ func (c *Client) Register(ctx context.Context, bootstrapToken string, req protoc
 // RenewCertificate sends a new CSR, authenticating with the still valid certificate.
 func (c *Client) RenewCertificate(ctx context.Context, csr string) (*protocol.CertificateResponse, error) {
 	var out protocol.CertificateResponse
-	if _, err := c.do(ctx, http.MethodPost, "/v1/agent/certificate", "", defaultTimeout, protocol.CertificateRequest{CSR: csr}, &out); err != nil {
+	if _, err := c.do(ctx, metrics.OpRenew, http.MethodPost, "/v1/agent/certificate", "", defaultTimeout, protocol.CertificateRequest{CSR: csr}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -168,7 +173,7 @@ func (c *Client) RenewCertificate(ctx context.Context, csr string) (*protocol.Ce
 
 func (c *Client) Heartbeat(ctx context.Context, req protocol.HeartbeatRequest) (*protocol.HeartbeatResponse, error) {
 	var out protocol.HeartbeatResponse
-	if _, err := c.do(ctx, http.MethodPut, "/v1/agent/heartbeat", "", defaultTimeout, req, &out); err != nil {
+	if _, err := c.do(ctx, metrics.OpHeartbeat, http.MethodPut, "/v1/agent/heartbeat", "", defaultTimeout, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -179,7 +184,7 @@ func (c *Client) PollActions(ctx context.Context, wait int) (*protocol.ActionsRe
 	var out protocol.ActionsResponse
 	path := "/v1/agent/actions?wait=" + url.QueryEscape(fmt.Sprint(wait))
 	timeout := time.Duration(wait)*time.Second + 15*time.Second
-	if _, err := c.do(ctx, http.MethodGet, path, "", timeout, nil, &out); err != nil {
+	if _, err := c.do(ctx, metrics.OpPoll, http.MethodGet, path, "", timeout, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -187,17 +192,17 @@ func (c *Client) PollActions(ctx context.Context, wait int) (*protocol.ActionsRe
 
 // Claim takes ownership of an action: only a successful claim authorizes execution.
 func (c *Client) Claim(ctx context.Context, actionID string) error {
-	_, err := c.do(ctx, http.MethodPost, "/v1/agent/actions/"+url.PathEscape(actionID)+"/claim", "", defaultTimeout, nil, nil)
+	_, err := c.do(ctx, metrics.OpClaim, http.MethodPost, "/v1/agent/actions/"+url.PathEscape(actionID)+"/claim", "", defaultTimeout, nil, nil)
 	return err
 }
 
 func (c *Client) SendResult(ctx context.Context, actionID string, res protocol.Result) error {
-	_, err := c.do(ctx, http.MethodPost, "/v1/agent/actions/"+url.PathEscape(actionID)+"/result", "", defaultTimeout, res, nil)
+	_, err := c.do(ctx, metrics.OpResult, http.MethodPost, "/v1/agent/actions/"+url.PathEscape(actionID)+"/result", "", defaultTimeout, res, nil)
 	return err
 }
 
 // PutStatus sends the cluster status summary; the backend keeps only the latest.
 func (c *Client) PutStatus(ctx context.Context, s protocol.ClusterStatus) error {
-	_, err := c.do(ctx, http.MethodPut, "/v1/agent/status", "", defaultTimeout, s, nil)
+	_, err := c.do(ctx, metrics.OpStatus, http.MethodPut, "/v1/agent/status", "", defaultTimeout, s, nil)
 	return err
 }
