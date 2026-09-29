@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# End-to-end test on kind: the agent installed with deploy/agent.yaml (real
+# End-to-end test on kind: the agent installed with the Helm chart (real
 # RBAC) registers with the mock backend over mTLS, runs approved actions,
 # rejects the ones outside the policy, renews its certificate, exposes health
-# probes and metrics, keeps its identity (in a Secret) across restarts and
-# registers again with a new bootstrap token.
+# probes and metrics, keeps its identity (in a Secret) across restarts, survives helm upgrade,
+# uninstall and reinstall with its identity, and registers again with a new
+# bootstrap token.
 #
 #   kind create cluster --name thumbops-e2e --config test/e2e/kind.yaml
 #   test/e2e/run.sh
@@ -94,8 +95,16 @@ metric() {
   curl -fsS "http://localhost:$METRICS_PORT/metrics" | awk -v s="$1" '$1 == s { print $2 }'
 }
 
+# helm_agent install|upgrade [ARGS...]: the agent release with the e2e values.
+helm_agent() {
+  local cmd=$1
+  shift
+  helm "$cmd" thumbops-agent charts/thumbops-agent -n thumbops -f test/e2e/values.yaml \
+    --set-file backend.caBundle="$work/tls.crt" --wait --timeout 3m "$@"
+}
+
 agent_restarts() {
-  kubectl -n thumbops get pods -l app=thumbops-agent --field-selector=status.phase=Running -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'
+  kubectl -n thumbops get pods -l app.kubernetes.io/name=thumbops-agent --field-selector=status.phase=Running -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'
 }
 
 log "building and loading the images"
@@ -116,14 +125,7 @@ pf_pid=$!
 wait_for "port-forward to the mock backend" 30 backend GET /debug/actions
 
 log "installing the agent"
-kubectl create namespace thumbops --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n thumbops create secret generic thumbops-bootstrap --from-literal=token=e2e-bootstrap-token \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n thumbops create configmap thumbops-backend-ca --from-file=ca.crt="$work/tls.crt" \
-  --dry-run=client -o yaml | kubectl apply -f -
-cp deploy/agent.yaml test/e2e/agent/kustomization.yaml "$work/"
-kubectl apply -k "$work"
-kubectl -n thumbops rollout status deploy/thumbops-agent --timeout=120s
+helm_agent install --create-namespace
 wait_for "agent registration" 60 agent_logged '"agent registered"'
 
 # The agent reads and updates only its identity Secret: no other Secret, no create.
@@ -199,7 +201,7 @@ identity_field() {
 
 restart_agent() {
   local old
-  old=$(kubectl -n thumbops get pods -l app=thumbops-agent -o name)
+  old=$(kubectl -n thumbops get pods -l app.kubernetes.io/name=thumbops-agent -o name)
   kubectl -n thumbops rollout restart deploy/thumbops-agent
   kubectl -n thumbops rollout status deploy/thumbops-agent --timeout=120s
   # The logs checked next must come from the new pod only.
@@ -209,7 +211,7 @@ restart_agent() {
 
 log "restart: the identity in the Secret is kept"
 key_before=$(identity_field 'key\.pem')
-kubectl apply -k "$work" >/dev/null # applying the manifest again must not erase it
+helm_agent upgrade >/dev/null # an upgrade must not erase it
 [[ $(identity_field 'key\.pem') == "$key_before" ]]
 restart_agent
 if agent_logged '"agent registered"'; then
@@ -219,11 +221,28 @@ fi
 [[ $(identity_field 'key\.pem') == "$key_before" ]]
 run_action succeeded '{"type":"scale","params":{"namespace":"default","deployment":"web","replicas":2}}'
 
+log "uninstall and install again: the identity Secret is kept and adopted"
+old=$(kubectl -n thumbops get pods -l app.kubernetes.io/name=thumbops-agent -o name)
+helm uninstall thumbops-agent -n thumbops --wait
+kubectl -n thumbops wait --for=delete $old --timeout=120s
+[[ $(identity_field 'key\.pem') == "$key_before" ]]
+helm_agent install
+wait_for "agent start" 60 agent_logged '"agent started"'
+if agent_logged '"agent registered"'; then
+  echo "the agent registered again after a reinstall" >&2
+  exit 1
+fi
+[[ $(identity_field 'key\.pem') == "$key_before" ]]
+run_action succeeded '{"type":"scale","params":{"namespace":"default","deployment":"web","replicas":1}}'
+
 log "new bootstrap token: the agent registers again"
 backend POST /debug/bootstrap-tokens '{"token":"e2e-bootstrap-token-2"}' >/dev/null
-kubectl -n thumbops create secret generic thumbops-bootstrap --from-literal=token=e2e-bootstrap-token-2 \
-  --dry-run=client -o yaml | kubectl apply -f -
-restart_agent
+# The token is part of the pod template (checksum/bootstrap): the upgrade
+# replaces the pod by itself, so no restart is needed.
+old=$(kubectl -n thumbops get pods -l app.kubernetes.io/name=thumbops-agent -o name)
+helm_agent upgrade --reuse-values --set bootstrap.token=e2e-bootstrap-token-2 >/dev/null
+kubectl -n thumbops wait --for=delete $old --timeout=120s
+wait_for "agent start" 60 agent_logged '"agent started"'
 agent_logged '"agent registered"'
 [[ $(identity_field 'key\.pem') != "$key_before" ]]
 run_action succeeded '{"type":"scale","params":{"namespace":"default","deployment":"web","replicas":3}}'

@@ -1,0 +1,17 @@
+{{- if include "thumbops-agent.serviceEnabled" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "thumbops-agent.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "thumbops-agent.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.http.port }}
+      targetPort: http
+{{- end }}

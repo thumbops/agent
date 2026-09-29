@@ -1,0 +1,12 @@
+# Local policy: managed by the cluster team, not by the backend.
+# An action outside the policy is rejected even if approved in the app.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "thumbops-agent.fullname" . }}-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "thumbops-agent.labels" . | nindent 4 }}
+data:
+  policy.json: |
+    {{- include "thumbops-agent.policy" . | nindent 4 }}
