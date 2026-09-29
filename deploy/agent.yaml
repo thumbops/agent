@@ -5,6 +5,13 @@
 #
 # Two ClusterRoles: thumbops-agent-actions grants only what the five actions
 # need; thumbops-agent-status is read-only, for the dashboard's cluster status.
+# The Role thumbops-agent-identity lets the agent read and update only the
+# Secret holding its key and certificate.
+#
+# To register again (cluster revoked, certificate expired), put a new
+# single-use token in thumbops-bootstrap and restart the agent: a token
+# different from the one used for the saved identity triggers a new
+# registration.
 # To install the agent for the dashboard only, drop the actions ClusterRole
 # and binding and leave "allowed_actions" empty in the policy; to install it
 # without the dashboard, drop the status ones and run it with --status=false.
@@ -53,6 +60,41 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: thumbops-agent-actions
+subjects:
+  - kind: ServiceAccount
+    name: thumbops-agent
+    namespace: thumbops
+---
+# Agent identity: private key and certificate. Created empty here and filled
+# by the agent, so it needs no permission to create Secrets. Applying this
+# manifest again does not erase what the agent wrote.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: thumbops-agent-identity
+  namespace: thumbops
+type: Opaque
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: thumbops-agent-identity
+  namespace: thumbops
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["thumbops-agent-identity"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: thumbops-agent-identity
+  namespace: thumbops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: thumbops-agent-identity
 subjects:
   - kind: ServiceAccount
     name: thumbops-agent
@@ -131,7 +173,6 @@ spec:
           image: ghcr.io/thumbops/agent:0.1.0 # replace with your own image
           args:
             - --backend-url=https://agent.thumbops.mobiletechnologies.cloud
-            - --state-dir=/var/lib/thumbops
             - --policy-file=/etc/thumbops/policy/policy.json
             - --bootstrap-token-file=/etc/thumbops/bootstrap/token
           resources:
@@ -143,8 +184,6 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            - name: state
-              mountPath: /var/lib/thumbops
             - name: policy
               mountPath: /etc/thumbops/policy
               readOnly: true
@@ -152,26 +191,10 @@ spec:
               mountPath: /etc/thumbops/bootstrap
               readOnly: true
       volumes:
-        # Prototype: key and certificate on a PVC, so they survive restarts.
-        # In production they will live in a Secret managed by the agent.
-        - name: state
-          persistentVolumeClaim:
-            claimName: thumbops-agent-state
         - name: policy
           configMap:
             name: thumbops-policy
         - name: bootstrap
           secret:
             secretName: thumbops-bootstrap
-            optional: true # no longer needed after registration
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: thumbops-agent-state
-  namespace: thumbops
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 10Mi
+            optional: true # needed only to register

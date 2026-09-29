@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -35,7 +36,9 @@ func main() {
 	var (
 		backendURL  = flag.String("backend-url", "https://agent.thumbops.mobiletechnologies.cloud", "backend URL")
 		backendCA   = flag.String("backend-ca-file", "", "backend server CA (empty = system CAs)")
-		stateDir    = flag.String("state-dir", "/var/lib/thumbops", "directory for the private key and certificate")
+		stateSecret = flag.String("state-secret", "thumbops-agent-identity", "Secret for the private key and certificate, in the agent namespace")
+		namespace   = flag.String("namespace", "", "agent namespace (empty = the pod namespace)")
+		stateDir    = flag.String("state-dir", "", "DEVELOPMENT ONLY: directory for the private key and certificate instead of the Secret")
 		tokenFile   = flag.String("bootstrap-token-file", "/etc/thumbops/bootstrap/token", "single-use bootstrap token for the first registration")
 		policyFile  = flag.String("policy-file", "/etc/thumbops/policy/policy.json", "cluster local policy (JSON)")
 		devInsecure = flag.Bool("dev-insecure", false, "DEVELOPMENT ONLY: backend over HTTP, no registration and no mTLS")
@@ -88,19 +91,20 @@ func main() {
 	userAgent := "thumbops-agent/" + version
 	cfg := agent.Config{Version: version, HeartbeatInterval: *hbInterval, Logger: log}
 
+	// client-go reads the same connection settings; BearerTokenFile is
+	// re-read because the ServiceAccount token rotates.
+	cs, err := kubernetes.NewForConfig(&rest.Config{
+		Host:            kcfg.Host,
+		BearerToken:     kcfg.Token,
+		BearerTokenFile: kcfg.TokenFile,
+		TLSClientConfig: rest.TLSClientConfig{CAFile: kcfg.CAFile},
+		UserAgent:       userAgent,
+	})
+	if err != nil {
+		fatal("Kubernetes client: %v", err)
+	}
+
 	if *statusOn {
-		// client-go reads the same connection settings; BearerTokenFile is
-		// re-read because the ServiceAccount token rotates.
-		cs, err := kubernetes.NewForConfig(&rest.Config{
-			Host:            kcfg.Host,
-			BearerToken:     kcfg.Token,
-			BearerTokenFile: kcfg.TokenFile,
-			TLSClientConfig: rest.TLSClientConfig{CAFile: kcfg.CAFile},
-			UserAgent:       userAgent,
-		})
-		if err != nil {
-			fatal("Kubernetes client for the cluster status: %v", err)
-		}
 		collector := status.NewCollector(cs, pol.Status.ExcludeNamespaces)
 		collector.Start(ctx)
 		cfg.Status = collector
@@ -126,28 +130,43 @@ func main() {
 				fatal("no valid certificate in %s", *backendCA)
 			}
 		}
-		store := identity.Store{Dir: *stateDir}
+		var store identity.Store
+		if *stateDir != "" {
+			store = identity.FileStore{Dir: *stateDir}
+		} else {
+			ns := *namespace
+			if ns == "" {
+				if ns, err = kube.InClusterNamespace(); err != nil {
+					fatal("%v (outside the cluster use --namespace or --state-dir)", err)
+				}
+			}
+			store = identity.SecretStore{Client: cs, Namespace: ns, Name: *stateSecret}
+		}
 		holder := &identity.Holder{}
 		b = backend.New(backend.Options{BaseURL: *backendURL, UserAgent: userAgent, TLS: holder.ClientTLS(roots)})
+		en := &enroll.Enroller{Backend: b, Store: store, Holder: holder, Logger: log}
 
-		if store.Registered() {
-			if err := enroll.Activate(b, store, holder); err != nil {
-				fatal("%v", err)
-			}
-		} else {
-			if err := register(ctx, b, k, store, holder, *tokenFile); err != nil {
-				fatal("registration failed: %v", err)
-			}
-			log.Info("agent registered", "cluster_id", store.ClusterID())
+		token, err := readToken(*tokenFile)
+		if err != nil {
+			fatal("%v", err)
+		}
+		registered, err := en.Start(ctx, token, func(ctx context.Context) (protocol.RegisterRequest, error) {
+			return registerInfo(ctx, k)
+		})
+		if err != nil {
+			fatal("identity: %v", err)
+		}
+		if registered {
+			log.Info("agent registered", "cluster_id", en.ClusterID())
 		}
 		cfg.Renew = func(ctx context.Context) error {
-			renewed, err := enroll.Renew(ctx, b, store, holder, time.Now())
+			renewed, err := en.Renew(ctx, time.Now())
 			if renewed {
 				log.Info("certificate renewed", "expires", holder.Get().Leaf.NotAfter)
 			}
 			return err
 		}
-		log.Info("identity loaded", "cluster_id", store.ClusterID(), "certificate_expires", holder.Get().Leaf.NotAfter)
+		log.Info("identity loaded", "cluster_id", en.ClusterID(), "certificate_expires", holder.Get().Leaf.NotAfter)
 	}
 
 	a := agent.New(cfg, b, k, actions.New(k), pol)
@@ -158,22 +177,30 @@ func main() {
 	log.Info("agent stopped")
 }
 
-func register(ctx context.Context, b *backend.Client, k *kube.Client, store identity.Store, holder *identity.Holder, tokenFile string) error {
-	token, err := os.ReadFile(tokenFile)
-	if err != nil {
-		return fmt.Errorf("cannot read the bootstrap token: %w", err)
+// readToken reads the bootstrap token; a missing file means no token (the
+// bootstrap Secret is optional once the agent is registered).
+func readToken(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
 	}
+	if err != nil {
+		return "", fmt.Errorf("cannot read the bootstrap token: %w", err)
+	}
+	return string(b), nil
+}
+
+// registerInfo collects the cluster data sent at registration.
+func registerInfo(ctx context.Context, k *kube.Client) (protocol.RegisterRequest, error) {
 	ver, err := k.ServerVersion(ctx)
 	if err != nil {
-		return fmt.Errorf("Kubernetes version: %w", err)
+		return protocol.RegisterRequest{}, fmt.Errorf("Kubernetes version: %w", err)
 	}
 	uid, err := k.NamespaceUID(ctx, "kube-system")
 	if err != nil {
-		return fmt.Errorf("kube-system UID: %w", err)
+		return protocol.RegisterRequest{}, fmt.Errorf("kube-system UID: %w", err)
 	}
-	return enroll.Register(ctx, b, store, holder, string(token), protocol.RegisterRequest{
-		AgentVersion: version, KubernetesVersion: ver, ClusterUID: uid,
-	})
+	return protocol.RegisterRequest{AgentVersion: version, KubernetesVersion: ver, ClusterUID: uid}, nil
 }
 
 func fatal(format string, args ...any) {

@@ -45,6 +45,18 @@ There are five actions: `rollout-restart`, `scale`, `cordon`, `uncordon`,
   presented only at the TLS handshake: after registration and renewal the
   agent reopens its connections to the backend. (A test covers it: without
   this step the agent was rejected right after registering.)
+- **Identity in a Secret.** Key, certificate and the SHA-256 of the
+  bootstrap token used live in the `thumbops-agent-identity` Secret, created
+  empty by the manifest: the agent can only read and update that Secret. Key
+  and certificate are saved together in one update. `--state-dir` keeps them
+  in a directory instead, for development outside the cluster.
+- **A new bootstrap token means "register again".** At startup the agent
+  registers when it has no identity, or when the mounted token differs from
+  the one used for the saved identity. After a `401` (cluster revoked,
+  certificate expired) the fix is a new token from the app in the
+  `thumbops-bootstrap` Secret and a restart. The saved identity is replaced
+  only after the new registration succeeds; the same token never triggers a
+  second one.
 - **A rejected certificate counts as a `401`.** An expired, revoked or
   unknown-CA certificate is rejected during the TLS handshake, with no HTTP
   response: the agent stops as it does for a `401` instead of retrying
@@ -60,7 +72,7 @@ internal/kube        minimal Kubernetes REST client
 internal/actions     action execution
 internal/policy      cluster local policy
 internal/backend     backend client
-internal/identity    Ed25519 key, CSR, certificate
+internal/identity    Ed25519 key, CSR, certificate; stored in a Secret or a directory
 internal/enroll      registration and renewal
 internal/agent       main loop
 internal/status      cluster status: informers and summary
@@ -88,8 +100,9 @@ renewal and rejected certificates.
 `test/e2e/run.sh` installs the agent with `deploy/agent.yaml` (the real RBAC
 and security context, only the image, backend URL and intervals changed) next
 to the mock backend in HTTPS with mTLS. It then checks registration, scale,
-rollout-restart, cordon, drain, uncordon, two policy rejections and a
-certificate renewal. The script refuses to run unless the kubectl context is
+rollout-restart, cordon, drain, uncordon, two policy rejections, a
+certificate renewal, the agent's permissions on Secrets, the identity kept
+across a restart and a new registration with a new bootstrap token. The script refuses to run unless the kubectl context is
 `kind-thumbops-e2e`.
 
 ```
@@ -151,8 +164,9 @@ one: single-use bootstrap token, mTLS required on `/v1/agent/*`, certificate
 renewal. With a short `-cert-lifetime` the renewal happens after a few
 seconds (when less than a third of the validity is left, checked at every
 heartbeat). The client certificate CA is regenerated at every start of the
-mock backend: after it restarts, the agent must register again with an empty
-`--state-dir`.
+mock backend: after it restarts, the agent must register again with a new
+token (or an empty `--state-dir`). `POST /debug/bootstrap-tokens` accepts one
+more single-use token, to try a new registration without restarting it.
 
 ```
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 7 -subj /CN=mock-backend \
@@ -168,7 +182,6 @@ curl --cacert /tmp/server.crt https://127.0.0.1:8443/debug/actions
 
 ## Missing for production
 
-- Key and certificate in a Secret instead of a volume.
 - Prometheus metrics for the agent and liveness probes.
 - Intermediate results for long drains (an open question in the protocol).
 

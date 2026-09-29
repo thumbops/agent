@@ -265,7 +265,10 @@ func TestExpiredCertificateStopsAgent(t *testing.T) {
 	roots.AddCert(srv.Certificate())
 	holder := &identity.Holder{}
 	b := backend.New(backend.Options{BaseURL: srv.URL, TLS: holder.ClientTLS(roots)})
-	if err := enroll.Register(context.Background(), b, identity.Store{Dir: t.TempDir()}, holder, "bootstrap-test-token", protocol.RegisterRequest{}); err != nil {
+	en := &enroll.Enroller{Backend: b, Store: identity.FileStore{Dir: t.TempDir()}, Holder: holder}
+	if _, err := en.Start(context.Background(), "bootstrap-test-token", func(context.Context) (protocol.RegisterRequest, error) {
+		return protocol.RegisterRequest{}, nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -61,7 +61,7 @@ type Agent struct {
 
 // ErrUnauthorized means the backend no longer accepts the certificate
 // (cluster revoked or certificate expired): a new registration is needed.
-var ErrUnauthorized = errors.New("the backend rejects the agent certificate: cluster revoked or certificate invalid, a new registration is needed")
+var ErrUnauthorized = errors.New("the backend rejects the agent certificate: cluster revoked or certificate invalid, a new registration is needed (put a new bootstrap token in the bootstrap Secret and restart the agent)")
 
 // unauthorized keeps the cause (401 or TLS alert) next to ErrUnauthorized.
 func unauthorized(cause error) error {
