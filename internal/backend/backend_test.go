@@ -8,12 +8,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/thumbops/agent/internal/backend"
 	"github.com/thumbops/agent/internal/enroll"
 	"github.com/thumbops/agent/internal/identity"
+	"github.com/thumbops/agent/internal/metrics"
 	"github.com/thumbops/agent/internal/mockbackend"
 	"github.com/thumbops/agent/internal/protocol"
 )
@@ -178,4 +180,46 @@ func TestCertificateRenewal(t *testing.T) {
 	if !cert.PrivateKey.(ed25519.PrivateKey).Equal(holder.Get().PrivateKey) {
 		t.Fatal("the renewal changed the key")
 	}
+}
+
+func TestBackendRequestsAreCounted(t *testing.T) {
+	mb, srv, roots := startTLS(t)
+	m := metrics.New("test")
+	holder := &identity.Holder{}
+	c := backend.New(backend.Options{BaseURL: srv.URL, TLS: holder.ClientTLS(roots), Metrics: m})
+
+	e := &enroll.Enroller{Backend: c, Store: identity.FileStore{Dir: t.TempDir()}, Holder: holder}
+	if _, err := e.Start(context.Background(), "bootstrap-test-token", func(context.Context) (protocol.RegisterRequest, error) { return info, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	mb.SetPollStatus(http.StatusServiceUnavailable)
+	if _, err := c.PollActions(context.Background(), 1); backend.Code(err) != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %v", err)
+	}
+	srv.Close()
+	if _, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{}); err == nil {
+		t.Fatal("expected a network error")
+	}
+
+	body := scrape(t, m)
+	for _, line := range []string{
+		`thumbops_agent_backend_requests_total{code="200",operation="register"} 1`,
+		`thumbops_agent_backend_requests_total{code="200",operation="heartbeat"} 1`,
+		`thumbops_agent_backend_requests_total{code="503",operation="poll"} 1`,
+		`thumbops_agent_backend_requests_total{code="error",operation="heartbeat"} 1`,
+	} {
+		if !strings.Contains(body, line) {
+			t.Errorf("missing %s in:\n%s", line, body)
+		}
+	}
+}
+
+func scrape(t *testing.T, m *metrics.Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	return rec.Body.String()
 }

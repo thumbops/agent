@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -18,8 +20,10 @@ import (
 	"github.com/thumbops/agent/internal/agent"
 	"github.com/thumbops/agent/internal/backend"
 	"github.com/thumbops/agent/internal/enroll"
+	"github.com/thumbops/agent/internal/health"
 	"github.com/thumbops/agent/internal/identity"
 	"github.com/thumbops/agent/internal/kube"
+	"github.com/thumbops/agent/internal/metrics"
 	"github.com/thumbops/agent/internal/policy"
 	"github.com/thumbops/agent/internal/protocol"
 	"github.com/thumbops/agent/internal/status"
@@ -50,6 +54,7 @@ func main() {
 		hbInterval  = flag.Duration("heartbeat-interval", 60*time.Second, "interval between heartbeats")
 		statusOn    = flag.Bool("status", true, "send the cluster status for the dashboard (needs the thumbops-agent-status ClusterRole)")
 		statusEvery = flag.Duration("status-interval", 60*time.Second, "interval between cluster status summaries")
+		httpAddr    = flag.String("http-addr", ":9090", "address for /healthz, /readyz and /metrics (empty = disabled)")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -67,6 +72,29 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	m := metrics.New(version)
+	hs := health.New(health.LivenessThreshold(*hbInterval), nil)
+	if *httpAddr != "" {
+		// Started before registration: liveness answers while the agent
+		// registers, readiness answers 503 until Run starts.
+		// Bound synchronously: a port conflict must fail the process before
+		// registration can consume the single-use bootstrap token.
+		ln, err := net.Listen("tcp", *httpAddr)
+		if err != nil {
+			fatal("health and metrics server: %v", err)
+		}
+		srv := &http.Server{Handler: health.Handler(hs, m.Handler()), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fatal("health and metrics server: %v", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			srv.Close()
+		}()
+	}
 
 	kcfg := kube.Config{Host: *kubeAPI, Token: *kubeToken, CAFile: *kubeCA}
 	if *kubeAPI == "" {
@@ -89,7 +117,7 @@ func main() {
 	}
 
 	userAgent := "thumbops-agent/" + version
-	cfg := agent.Config{Version: version, HeartbeatInterval: *hbInterval, Logger: log}
+	cfg := agent.Config{Version: version, HeartbeatInterval: *hbInterval, Logger: log, Metrics: m, Health: hs}
 
 	// client-go reads the same connection settings; BearerTokenFile is
 	// re-read because the ServiceAccount token rotates.
@@ -114,7 +142,7 @@ func main() {
 	var b *backend.Client
 	if *devInsecure {
 		log.Warn("development mode: no authentication to the backend")
-		b = backend.New(backend.Options{BaseURL: *backendURL, UserAgent: userAgent})
+		b = backend.New(backend.Options{BaseURL: *backendURL, UserAgent: userAgent, Metrics: m})
 	} else {
 		if !strings.HasPrefix(*backendURL, "https://") {
 			fatal("the backend must be reached over HTTPS (for development: --dev-insecure)")
@@ -143,8 +171,8 @@ func main() {
 			store = identity.SecretStore{Client: cs, Namespace: ns, Name: *stateSecret}
 		}
 		holder := &identity.Holder{}
-		b = backend.New(backend.Options{BaseURL: *backendURL, UserAgent: userAgent, TLS: holder.ClientTLS(roots)})
-		en := &enroll.Enroller{Backend: b, Store: store, Holder: holder, Logger: log}
+		b = backend.New(backend.Options{BaseURL: *backendURL, UserAgent: userAgent, TLS: holder.ClientTLS(roots), Metrics: m})
+		en := &enroll.Enroller{Backend: b, Store: store, Holder: holder, Logger: log, Metrics: m}
 
 		token, err := readToken(*tokenFile)
 		if err != nil {

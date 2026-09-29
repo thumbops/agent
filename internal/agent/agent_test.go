@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,8 +17,10 @@ import (
 	"github.com/thumbops/agent/internal/actions"
 	"github.com/thumbops/agent/internal/backend"
 	"github.com/thumbops/agent/internal/enroll"
+	"github.com/thumbops/agent/internal/health"
 	"github.com/thumbops/agent/internal/identity"
 	"github.com/thumbops/agent/internal/kubefake"
+	"github.com/thumbops/agent/internal/metrics"
 	"github.com/thumbops/agent/internal/mockbackend"
 	"github.com/thumbops/agent/internal/policy"
 	"github.com/thumbops/agent/internal/protocol"
@@ -368,7 +371,9 @@ func waitStatuses(t *testing.T, e *env, n int) []protocol.ClusterStatus {
 
 func TestStatusSentWhenReadyAndOnRequest(t *testing.T) {
 	src := &fakeStatus{}
+	m := metrics.New("test")
 	e := newEnv(t, nil, func(c *Config) {
+		c.Metrics = m
 		c.Status = src
 		c.StatusRetry = 10 * time.Millisecond
 		c.StatusInterval = time.Hour // only the first summary and the requested ones
@@ -380,8 +385,18 @@ func TestStatusSentWhenReadyAndOnRequest(t *testing.T) {
 	if n := len(e.mb.Statuses()); n != 0 {
 		t.Fatalf("nothing must be sent before the caches sync, got %d", n)
 	}
+	if v := value(t, scrape(t, m), "thumbops_agent_status_ready"); v != 0 {
+		t.Fatalf("status_ready before the caches sync: %v", v)
+	}
 	src.setReady()
 	waitStatuses(t, e, 1)
+	body := scrape(t, m)
+	if v := value(t, body, "thumbops_agent_status_ready"); v != 1 {
+		t.Fatalf("status_ready after sync: %v", v)
+	}
+	if v := value(t, body, "thumbops_agent_status_last_sent_timestamp_seconds"); v == 0 {
+		t.Fatal("status_last_sent not set")
+	}
 
 	e.mb.RequestStatus() // the user pressed refresh in the app
 	got := waitStatuses(t, e, 2)
@@ -413,5 +428,109 @@ func TestStatusUnauthorizedStopsAgent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a 401 on the status must stop the agent")
+	}
+}
+
+func scrape(t *testing.T, m *metrics.Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	return rec.Body.String()
+}
+
+// value returns the sample of an exact series line such as
+// `thumbops_agent_actions_total{outcome="succeeded",type="scale"}`.
+func value(t *testing.T, body, series string) float64 {
+	t.Helper()
+	for _, l := range strings.Split(body, "\n") {
+		if f := strings.Fields(l); len(f) == 2 && f[0] == series {
+			v, err := strconv.ParseFloat(f[1], 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return v
+		}
+	}
+	t.Fatalf("series %s not found", series)
+	return 0
+}
+
+func TestActionMetrics(t *testing.T) {
+	m := metrics.New("test")
+	e := newEnv(t, nil, func(c *Config) { c.Metrics = m })
+	ctx := context.Background()
+	soon := time.Now().Add(time.Minute)
+
+	e.mb.Enqueue(protocol.Action{ActionID: "ok", Type: protocol.ActionCordon, Params: protocol.Params{Node: "worker-1"}, ExpiresAt: soon})
+	e.agent.handle(ctx, protocol.Action{ActionID: "ok", Type: protocol.ActionCordon, Params: protocol.Params{Node: "worker-1"}, ExpiresAt: soon})
+
+	e.mb.Enqueue(protocol.Action{ActionID: "sys", Type: protocol.ActionRolloutRestart, Params: protocol.Params{Namespace: "kube-system", Deployment: "coredns"}, ExpiresAt: soon})
+	e.agent.handle(ctx, protocol.Action{ActionID: "sys", Type: protocol.ActionRolloutRestart, Params: protocol.Params{Namespace: "kube-system", Deployment: "coredns"}, ExpiresAt: soon})
+
+	e.agent.handle(ctx, protocol.Action{ActionID: "old", Type: protocol.ActionScale, ExpiresAt: time.Now().Add(-time.Minute)})
+
+	e.mb.ClaimOverride["taken"] = http.StatusConflict
+	e.mb.Enqueue(protocol.Action{ActionID: "taken", Type: protocol.ActionUncordon, Params: protocol.Params{Node: "worker-1"}, ExpiresAt: soon})
+	e.agent.handle(ctx, protocol.Action{ActionID: "taken", Type: protocol.ActionUncordon, Params: protocol.Params{Node: "worker-1"}, ExpiresAt: soon})
+
+	body := scrape(t, m)
+	for series, want := range map[string]float64{
+		`thumbops_agent_actions_total{outcome="succeeded",type="cordon"}`:         1,
+		`thumbops_agent_actions_total{outcome="rejected",type="rollout-restart"}`: 1,
+		`thumbops_agent_actions_total{outcome="expired",type="scale"}`:            1,
+		`thumbops_agent_actions_total{outcome="discarded",type="uncordon"}`:       1,
+		`thumbops_agent_action_duration_seconds_count{type="cordon"}`:             1,
+		`thumbops_agent_action_in_progress`:                                       0,
+	} {
+		if got := value(t, body, series); got != want {
+			t.Errorf("%s = %v, want %v", series, got, want)
+		}
+	}
+}
+
+func TestHeartbeatMetricsAndHealth(t *testing.T) {
+	m := metrics.New("test")
+	hs := health.New(time.Hour, nil)
+	e := newEnv(t, nil, func(c *Config) { c.Metrics = m; c.Health = hs })
+	e.mb.SetPollStatus(http.StatusUpgradeRequired)
+	if hs.Ready() {
+		t.Fatal("ready before Run")
+	}
+	stop := e.run(t)
+	deadline := time.Now().Add(5 * time.Second)
+	for body := scrape(t, m); !strings.Contains(body, "thumbops_agent_heartbeat_only 1") || strings.Contains(body, "thumbops_agent_heartbeat_last_success_timestamp_seconds 0\n"); body = scrape(t, m) {
+		if time.Now().After(deadline) {
+			stop()
+			t.Fatal("heartbeat_only never became 1")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if !hs.Ready() {
+		t.Fatal("not ready after Run started")
+	}
+	body := scrape(t, m)
+	if v := value(t, body, "thumbops_agent_heartbeat_last_success_timestamp_seconds"); time.Since(time.Unix(int64(v), 0)) > time.Minute {
+		t.Fatalf("last heartbeat timestamp not recent: %v", v)
+	}
+	if v := value(t, body, "thumbops_agent_heartbeat_only"); v != 1 {
+		t.Fatalf("heartbeat_only after 426: %v", v)
+	}
+}
+
+func TestHeartbeatAttemptKeepsLivenessWhenBackendIsDown(t *testing.T) {
+	now := time.Unix(1000, 0)
+	hs := health.New(time.Minute, func() time.Time { return now })
+	e := newEnv(t, nil, func(c *Config) { c.Health = hs })
+	e.mb.SetHeartbeatStatus(http.StatusServiceUnavailable)
+	hs.MarkReady()                 // liveness is only judged once the agent is ready
+	now = now.Add(2 * time.Minute) // past the threshold
+	if err := e.agent.heartbeat(context.Background()); err == nil {
+		t.Fatal("expected the heartbeat to fail")
+	}
+	if err := hs.Live(); err != nil {
+		t.Fatalf("a failed heartbeat attempt must keep the agent live: %v", err)
 	}
 }

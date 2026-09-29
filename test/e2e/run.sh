@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end test on kind: the agent installed with deploy/agent.yaml (real
 # RBAC) registers with the mock backend over mTLS, runs approved actions,
-# rejects the ones outside the policy, renews its certificate, keeps its
-# identity (in a Secret) across restarts and registers again with a new
-# bootstrap token.
+# rejects the ones outside the policy, renews its certificate, exposes health
+# probes and metrics, keeps its identity (in a Secret) across restarts and
+# registers again with a new bootstrap token.
 #
 #   kind create cluster --name thumbops-e2e --config test/e2e/kind.yaml
 #   test/e2e/run.sh
@@ -18,6 +18,7 @@ KIND_CLUSTER=${KIND_CLUSTER:-thumbops-e2e}
 LOCAL_PORT=${LOCAL_PORT:-18443}
 work=$(mktemp -d)
 pf_pid=""
+agent_pf_pid=""
 
 if [[ $(kubectl config current-context) != "kind-$KIND_CLUSTER" ]]; then
   echo "the current kubectl context is not kind-$KIND_CLUSTER: refusing to run" >&2
@@ -40,6 +41,7 @@ cleanup() {
   local rc=$?
   [[ $rc -ne 0 ]] && dump
   [[ -n $pf_pid ]] && kill "$pf_pid" 2>/dev/null || true
+  [[ -n $agent_pf_pid ]] && kill "$agent_pf_pid" 2>/dev/null || true
   rm -rf "$work"
   exit $rc
 }
@@ -83,6 +85,17 @@ has_result() {
 
 agent_logged() {
   kubectl -n thumbops logs deploy/thumbops-agent | grep -q "$1"
+}
+
+METRICS_PORT=${METRICS_PORT:-19090}
+
+# metric SERIES: value of an exact series, e.g. 'thumbops_agent_status_ready'.
+metric() {
+  curl -fsS "http://localhost:$METRICS_PORT/metrics" | awk -v s="$1" '$1 == s { print $2 }'
+}
+
+agent_restarts() {
+  kubectl -n thumbops get pods -l app=thumbops-agent --field-selector=status.phase=Running -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'
 }
 
 log "building and loading the images"
@@ -155,6 +168,31 @@ wait_for "certificate renewal" 90 agent_logged '"certificate renewed"'
 run_action succeeded "{\"type\":\"uncordon\",\"params\":{\"node\":\"$workload_node\"}}"
 [[ $(kubectl get node "$workload_node" -o jsonpath='{.spec.unschedulable}') != true ]]
 
+log "health and metrics"
+kubectl -n thumbops port-forward deploy/thumbops-agent "$METRICS_PORT:9090" >/dev/null &
+agent_pf_pid=$!
+wait_for "port-forward to the agent" 30 curl -fsS "http://localhost:$METRICS_PORT/readyz"
+curl -fsS "http://localhost:$METRICS_PORT/healthz" >/dev/null
+for series in \
+  'thumbops_agent_actions_total{outcome="succeeded",type="scale"}' \
+  'thumbops_agent_actions_total{outcome="succeeded",type="rollout-restart"}' \
+  'thumbops_agent_actions_total{outcome="succeeded",type="cordon"}' \
+  'thumbops_agent_actions_total{outcome="succeeded",type="drain"}' \
+  'thumbops_agent_actions_total{outcome="succeeded",type="uncordon"}' \
+  'thumbops_agent_actions_total{outcome="rejected",type="scale"}' \
+  'thumbops_agent_actions_total{outcome="rejected",type="cordon"}' \
+  'thumbops_agent_status_ready'; do
+  [[ $(metric "$series") == 1 ]] || { echo "$series = $(metric "$series"), expected 1" >&2; exit 1; }
+done
+(( $(metric 'thumbops_agent_certificate_renewals_total{result="success"}') >= 1 ))
+# Large gauges come in exponent form (1.7e+09): round with awk, whose parsing
+# does not depend on the locale.
+last_hb=$(metric thumbops_agent_heartbeat_last_success_timestamp_seconds | awk '{ printf "%.0f", $1 }')
+(( $(date +%s) - last_hb < 60 ))
+[[ $(agent_restarts) == 0 ]] # the liveness probe never fired, drain included
+kill "$agent_pf_pid"
+agent_pf_pid=""
+
 identity_field() {
   kubectl -n thumbops get secret thumbops-agent-identity -o jsonpath="{.data.$1}"
 }
@@ -189,5 +227,7 @@ restart_agent
 agent_logged '"agent registered"'
 [[ $(identity_field 'key\.pem') != "$key_before" ]]
 run_action succeeded '{"type":"scale","params":{"namespace":"default","deployment":"web","replicas":3}}'
+
+[[ $(agent_restarts) == 0 ]]
 
 log "end-to-end tests passed"

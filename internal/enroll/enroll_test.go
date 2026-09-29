@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/thumbops/agent/internal/backend"
 	"github.com/thumbops/agent/internal/enroll"
 	"github.com/thumbops/agent/internal/identity"
+	"github.com/thumbops/agent/internal/metrics"
 	"github.com/thumbops/agent/internal/mockbackend"
 	"github.com/thumbops/agent/internal/protocol"
 )
@@ -176,6 +179,70 @@ func TestRenewalFailingToSaveKeepsTheOldCertificate(t *testing.T) {
 	if !cert.PrivateKey.(ed25519.PrivateKey).Equal(en.Holder.Get().PrivateKey) {
 		t.Fatal("the renewal changed the key")
 	}
+}
+
+func TestCertificateMetrics(t *testing.T) {
+	e := newEnv(t)
+	e.mb.CertLifetime = 3 * time.Hour
+	m := metrics.New("test")
+	en, c := e.agent()
+	en.Metrics = m
+	if _, err := en.Start(context.Background(), "bootstrap-test-token", infoFn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	first := en.Holder.Get().Leaf
+	if v := value(t, scrape(m), "thumbops_agent_certificate_expiry_timestamp_seconds"); v != float64(first.NotAfter.Unix()) {
+		t.Fatalf("expiry after registration: %v", v)
+	}
+
+	e.store.(*memStore).failures = 1
+	if _, err := en.Renew(context.Background(), first.NotAfter.Add(-time.Hour)); err == nil {
+		t.Fatal("expected the save error")
+	}
+	if _, err := en.Renew(context.Background(), first.NotAfter.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// A certificate that does not need renewal is not an attempt.
+	if _, err := en.Renew(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	body := scrape(m)
+	for series, want := range map[string]float64{
+		`thumbops_agent_certificate_renewals_total{result="error"}`:   1,
+		`thumbops_agent_certificate_renewals_total{result="success"}`: 1,
+		"thumbops_agent_certificate_expiry_timestamp_seconds":         float64(en.Holder.Get().Leaf.NotAfter.Unix()),
+	} {
+		if got := value(t, body, series); got != want {
+			t.Errorf("%s = %v, want %v", series, got, want)
+		}
+	}
+}
+
+func scrape(m *metrics.Metrics) string {
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	return rec.Body.String()
+}
+
+// value returns the sample of an exact series line; Prometheus may print
+// large values in exponent form, which ParseFloat reads.
+func value(t *testing.T, body, series string) float64 {
+	t.Helper()
+	for _, l := range strings.Split(body, "\n") {
+		if f := strings.Fields(l); len(f) == 2 && f[0] == series {
+			v, err := strconv.ParseFloat(f[1], 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return v
+		}
+	}
+	t.Fatalf("series %s not found", series)
+	return 0
 }
 
 // memStore is an in-memory Store whose saves can fail.

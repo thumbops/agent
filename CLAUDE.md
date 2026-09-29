@@ -46,6 +46,8 @@ the mock backend in HTTPS mode). Never on a production cluster.
 | `internal/enroll` | `Enroller`: registration, new registration with a new token, renewal |
 | `internal/agent` | Main loop: heartbeat, poll, claim, execution, result, status sending |
 | `internal/status` | Cluster status for the dashboard: client-go informers and the summary |
+| `internal/metrics` | Prometheus metrics on a private registry; nil-safe |
+| `internal/health` | Liveness and readiness state, HTTP handler for /healthz, /readyz, /metrics |
 | `internal/kubefake` | Fake API server for tests |
 | `internal/mockbackend` | Mock backend for tests and development |
 | `test/e2e` | End-to-end tests on kind: `deploy/agent.yaml` against the mock backend with mTLS |
@@ -104,6 +106,12 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
 - **Excluded namespaces are never listed.** Pods and deployments in the
   policy's `status.exclude_namespaces` never appear in the status (their
   requests still count in the aggregates, which carry no names).
+- **Liveness never depends on the backend.** `/healthz` fails only when the
+  heartbeat loop stops making attempts; a failed heartbeat still counts.
+  It never fails before readiness (startup, registration retries): a restart
+  there could lose the single-use bootstrap token.
+  Readiness never goes back to `503`. Otherwise a backend outage would make
+  Kubernetes restart the agent in a loop, interrupting actions.
 
 ## Next steps
 
@@ -111,7 +119,8 @@ Done: test on kind with the mock backend, the ServiceAccount's real RBAC and
 registration with mTLS; cluster status with informers, checked on kind
 against the real backend; `LICENSE`; identity in a Secret with a new
 registration on a new bootstrap token; CI (GitHub Actions) with lint, tests,
-end-to-end tests on kind and the multi-arch image on ghcr.io.
+end-to-end tests on kind and the multi-arch image on ghcr.io; health probes
+and Prometheus metrics.
 
-1. Helm chart (replaces `deploy/agent.yaml`, and the e2e kustomization with it; the identity Secret must survive upgrades and uninstalls, e.g. `helm.sh/resource-policy: keep`), liveness/readiness probes, Prometheus metrics.
+1. Helm chart (replaces `deploy/agent.yaml`, and the e2e kustomization with it; the identity Secret must survive upgrades and uninstalls, e.g. `helm.sh/resource-policy: keep`; Service and optional ServiceMonitor for /metrics).
 2. Status: events and real usage from metrics-server, when the dashboard needs them (out of the MVP).
