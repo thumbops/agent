@@ -111,7 +111,10 @@ Unit tests:
   the right `outcome`; a backend `503` is counted with `code="503"` and a
   rejected certificate with `code="error"`; the heartbeat timestamp is
   updated after a successful heartbeat; `heartbeat_only` is 1 after a `426`.
-- `status`: `status_ready` is 0 before the informers sync and 1 after.
+- `agent` status loop (where the summary is collected): `status_ready` is 0
+  before the informers sync and 1 after; `status_last_sent_timestamp_seconds`
+  is set once the backend accepts a summary. With `--status=false`
+  `status_ready` stays 0.
 
 End-to-end (`test/e2e/run.sh`):
 
