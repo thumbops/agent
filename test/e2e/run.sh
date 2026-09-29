@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end test on kind: the agent installed with deploy/agent.yaml (real
 # RBAC) registers with the mock backend over mTLS, runs approved actions,
-# rejects one outside the policy and renews its certificate.
+# rejects the ones outside the policy, renews its certificate, keeps its
+# identity (in a Secret) across restarts and registers again with a new
+# bootstrap token.
 #
 #   kind create cluster --name thumbops-e2e --config test/e2e/kind.yaml
 #   test/e2e/run.sh
@@ -111,6 +113,15 @@ kubectl apply -k "$work"
 kubectl -n thumbops rollout status deploy/thumbops-agent --timeout=120s
 wait_for "agent registration" 60 agent_logged '"agent registered"'
 
+# The agent reads and updates only its identity Secret: no other Secret, no create.
+sa=system:serviceaccount:thumbops:thumbops-agent
+for check in "yes get secret/thumbops-agent-identity" "yes update secret/thumbops-agent-identity" \
+  "no get secret/thumbops-bootstrap" "no create secrets" "no list secrets"; do
+  read -r want verb resource <<<"$check"
+  got=$(kubectl auth can-i "$verb" "$resource" -n thumbops --as="$sa" || true)
+  [[ $got == "$want" ]] || { echo "can-i $verb $resource: expected $want, got $got" >&2; exit 1; }
+done
+
 log "test workload"
 kubectl create deployment web --image=registry.k8s.io/pause:3.10 --replicas=2 --dry-run=client -o yaml | kubectl apply -f -
 kubectl rollout status deploy/web --timeout=120s
@@ -143,5 +154,40 @@ wait_for "certificate renewal" 90 agent_logged '"certificate renewed"'
 # An action after the renewal proves the new certificate is used (new connections).
 run_action succeeded "{\"type\":\"uncordon\",\"params\":{\"node\":\"$workload_node\"}}"
 [[ $(kubectl get node "$workload_node" -o jsonpath='{.spec.unschedulable}') != true ]]
+
+identity_field() {
+  kubectl -n thumbops get secret thumbops-agent-identity -o jsonpath="{.data.$1}"
+}
+
+restart_agent() {
+  local old
+  old=$(kubectl -n thumbops get pods -l app=thumbops-agent -o name)
+  kubectl -n thumbops rollout restart deploy/thumbops-agent
+  kubectl -n thumbops rollout status deploy/thumbops-agent --timeout=120s
+  # The logs checked next must come from the new pod only.
+  kubectl -n thumbops wait --for=delete $old --timeout=120s
+  wait_for "agent start" 60 agent_logged '"agent started"'
+}
+
+log "restart: the identity in the Secret is kept"
+key_before=$(identity_field 'key\.pem')
+kubectl apply -k "$work" >/dev/null # applying the manifest again must not erase it
+[[ $(identity_field 'key\.pem') == "$key_before" ]]
+restart_agent
+if agent_logged '"agent registered"'; then
+  echo "the agent registered again after a plain restart" >&2
+  exit 1
+fi
+[[ $(identity_field 'key\.pem') == "$key_before" ]]
+run_action succeeded '{"type":"scale","params":{"namespace":"default","deployment":"web","replicas":2}}'
+
+log "new bootstrap token: the agent registers again"
+backend POST /debug/bootstrap-tokens '{"token":"e2e-bootstrap-token-2"}' >/dev/null
+kubectl -n thumbops create secret generic thumbops-bootstrap --from-literal=token=e2e-bootstrap-token-2 \
+  --dry-run=client -o yaml | kubectl apply -f -
+restart_agent
+agent_logged '"agent registered"'
+[[ $(identity_field 'key\.pem') != "$key_before" ]]
+run_action succeeded '{"type":"scale","params":{"namespace":"default","deployment":"web","replicas":3}}'
 
 log "end-to-end tests passed"

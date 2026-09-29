@@ -56,7 +56,8 @@ type Server struct {
 	RequireMTLS    bool // requires a valid client certificate on /v1/agent/*
 	CertLifetime   time.Duration
 	clusterID      string
-	tokenUsed      bool
+	extraTokens    map[string]bool // AddBootstrapToken, for new registrations
+	usedTokens     map[string]bool
 	caCert         *x509.Certificate
 	caKey          ed25519.PrivateKey
 	caPEM          string
@@ -89,6 +90,8 @@ func New() *Server {
 		notify:         make(chan struct{}),
 		Poll:           protocol.PollConfig{WaitSeconds: 20},
 		ClaimOverride:  map[string]int{},
+		extraTokens:    map[string]bool{},
+		usedTokens:     map[string]bool{},
 		BootstrapToken: "bootstrap-test-token",
 		CertLifetime:   30 * 24 * time.Hour,
 		clusterID:      "8c1f0e7a-0000-4000-8000-00000000c1a5",
@@ -194,13 +197,27 @@ func (s *Server) Heartbeats() []protocol.HeartbeatRequest {
 	return append([]protocol.HeartbeatRequest(nil), s.heartbeats...)
 }
 
+func (s *Server) Registrations() []protocol.RegisterRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]protocol.RegisterRequest(nil), s.registrations...)
+}
+
+// AddBootstrapToken accepts one more single-use token, as when the cluster
+// gets a new token from the app to register again.
+func (s *Server) AddBootstrapToken(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.extraTokens[token] = true
+}
+
 func (s *Server) Renewals() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.renewals
 }
 
-// Handler exposes the protocol routes and, for development, two /debug routes.
+// Handler exposes the protocol routes and, for development, the /debug routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/register", s.register)
@@ -212,6 +229,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/agent/actions/{id}/result", s.result)
 	mux.HandleFunc("POST /debug/actions", s.debugEnqueue)
 	mux.HandleFunc("GET /debug/actions", s.debugList)
+	mux.HandleFunc("POST /debug/bootstrap-tokens", s.debugAddToken)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.RequireMTLS && strings.HasPrefix(r.URL.Path, "/v1/agent/") {
 			if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
@@ -267,7 +285,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r.Header.Get("Authorization") != "Bearer "+s.BootstrapToken || s.tokenUsed {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if (token != s.BootstrapToken && !s.extraTokens[token]) || s.usedTokens[token] {
 		http.Error(w, "bootstrap token invalid or already used", http.StatusUnauthorized)
 		return
 	}
@@ -276,7 +295,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.tokenUsed = true
+	s.usedTokens[token] = true
 	s.registrations = append(s.registrations, req)
 	writeJSON(w, http.StatusOK, protocol.RegisterResponse{ClusterID: s.clusterID, Certificate: cert, CAChain: s.caPEM, ExpiresAt: exp})
 }
@@ -446,6 +465,18 @@ func (s *Server) debugEnqueue(w http.ResponseWriter, r *http.Request) {
 	queued := s.entries[len(s.entries)-1].action
 	s.mu.Unlock()
 	writeJSON(w, http.StatusCreated, queued)
+}
+
+func (s *Server) debugAddToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Token == "" {
+		http.Error(w, `expected {"token": "..."}`, http.StatusBadRequest)
+		return
+	}
+	s.AddBootstrapToken(req.Token)
+	w.WriteHeader(http.StatusCreated)
 }
 
 func (s *Server) debugList(w http.ResponseWriter, _ *http.Request) {

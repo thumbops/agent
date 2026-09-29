@@ -42,8 +42,8 @@ the mock backend in HTTPS mode). Never on a production cluster.
 | `internal/actions` | Runs rollout-restart, scale, cordon, uncordon, drain |
 | `internal/policy` | Cluster local policy (JSON from a ConfigMap) |
 | `internal/backend` | Backend HTTP client |
-| `internal/identity` | Ed25519 key, CSR, certificate on disk |
-| `internal/enroll` | Registration and certificate renewal |
+| `internal/identity` | Ed25519 key, CSR, certificate; `SecretStore` (in the cluster) and `FileStore` (`--state-dir`, development) |
+| `internal/enroll` | `Enroller`: registration, new registration with a new token, renewal |
 | `internal/agent` | Main loop: heartbeat, poll, claim, execution, result, status sending |
 | `internal/status` | Cluster status for the dashboard: client-go informers and the summary |
 | `internal/kubefake` | Fake API server for tests |
@@ -81,14 +81,22 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
 - **Results are never lost.** Sending the result is retried with backoff
   until the backend confirms (except `400`/`409`/`410`).
 - **Certificate change = new connections.** After registration and renewal
-  `backend.Client.ResetConnections()` must be called (`enroll.Activate` does
-  it): the client certificate is presented only at the handshake, and long
+  `backend.Client.ResetConnections()` must be called (`Enroller.activate`
+  does it): the client certificate is presented only at the handshake, and long
   polling keeps the connection always active. This bug has been hit once.
 - **`401` stops the agent** (`ErrUnauthorized`); `426` leaves it in
   heartbeat-only mode. An expired or rejected certificate produces no `401`
   but a TLS alert at the handshake: `backend.Unauthorized` treats both cases
   the same way, otherwise the agent would retry forever. This was also found
   on kind.
+- **The identity is replaced only after success.** A new registration
+  (bootstrap token whose hash differs from the saved one) keeps the old key
+  and certificate until the new ones are saved; a renewal whose save fails
+  keeps the old certificate in use. Key and certificate are always saved
+  together. The token is never saved, only its SHA-256.
+- **The agent can only get and update its identity Secret.** The manifest
+  creates it empty; no `create` and no access to other Secrets (checked by
+  the end-to-end tests).
 - **The status never blocks the actions.** Without the
   `thumbops-agent-status` RBAC the informers never sync, no status is sent,
   a warning is logged after a minute, and actions keep working; the status
@@ -101,9 +109,9 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
 
 Done: test on kind with the mock backend, the ServiceAccount's real RBAC and
 registration with mTLS; cluster status with informers, checked on kind
-against the real backend; `LICENSE`; CI (GitHub Actions) with lint, tests,
+against the real backend; `LICENSE`; identity in a Secret with a new
+registration on a new bootstrap token; CI (GitHub Actions) with lint, tests,
 end-to-end tests on kind and the multi-arch image on ghcr.io.
 
-1. Key and certificate in a Secret managed by the agent instead of a PVC. Decide at the same time whether the agent should re-register by itself when it stops with `ErrUnauthorized` and finds a new bootstrap token (today the state must be wiped by hand).
-2. Helm chart (replaces `deploy/agent.yaml`, and the e2e kustomization with it), liveness/readiness probes, Prometheus metrics.
-3. Status: events and real usage from metrics-server, when the dashboard needs them (out of the MVP).
+1. Helm chart (replaces `deploy/agent.yaml`, and the e2e kustomization with it; the identity Secret must survive upgrades and uninstalls, e.g. `helm.sh/resource-policy: keep`), liveness/readiness probes, Prometheus metrics.
+2. Status: events and real usage from metrics-server, when the dashboard needs them (out of the MVP).

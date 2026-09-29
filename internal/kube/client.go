@@ -43,6 +43,15 @@ func InClusterConfig() (Config, error) {
 	}, nil
 }
 
+// InClusterNamespace returns the namespace of the pod's ServiceAccount.
+func InClusterNamespace() (string, error) {
+	b, err := os.ReadFile(serviceAccountDir + "/namespace")
+	if err != nil {
+		return "", fmt.Errorf("pod namespace: %w", err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
 // Client talks to the API server.
 type Client struct {
 	host string

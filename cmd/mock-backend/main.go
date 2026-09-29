@@ -11,10 +11,14 @@
 // registration with a single-use bootstrap token, mTLS required on
 // /v1/agent/* and certificate renewal (use a short -cert-lifetime to see it
 // happen). The client certificate CA is generated at every start: after a
-// restart the agent must register again, with an empty state-dir.
+// restart the agent must register again, with a new bootstrap token.
 //
 //	go run ./cmd/mock-backend -addr 127.0.0.1:8443 -tls-cert server.crt -tls-key server.key -cert-lifetime 2m
 //	curl --cacert server.crt https://127.0.0.1:8443/debug/actions
+//
+// A new single-use bootstrap token, to try a new registration:
+//
+//	curl --cacert server.crt https://127.0.0.1:8443/debug/bootstrap-tokens -d '{"token":"new-token"}'
 package main
 
 import (

@@ -4,73 +4,62 @@
 package identity
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
+// Keys of the saved state: file names in a FileStore, data keys in a SecretStore.
 const (
-	keyFile       = "key.pem"
-	certFile      = "cert.pem"
-	caFile        = "ca.pem"
-	clusterIDFile = "cluster_id"
+	keyKey       = "key.pem"
+	certKey      = "cert.pem"
+	caKey        = "ca.pem"
+	clusterIDKey = "cluster_id"
+	tokenHashKey = "bootstrap_token_sha256"
 )
 
-// Store keeps the identity and certificate in a directory.
-// In the prototype it is a volume; in production it will be a Secret (see README).
-type Store struct {
-	Dir string
+// State is everything the agent keeps about its identity. Key and
+// certificate are always saved together, so they never get out of step.
+type State struct {
+	Key       ed25519.PrivateKey
+	CertPEM   string
+	CAPEM     string
+	ClusterID string
+	// BootstrapTokenHash is the HashToken of the bootstrap token used for the
+	// registration: a different token means "register again".
+	BootstrapTokenHash string
 }
 
-func (s Store) path(name string) string { return filepath.Join(s.Dir, name) }
+// Store saves the State: a Secret in the cluster, a directory in development.
+type Store interface {
+	// Load returns the saved state, or nil (and no error) before the first registration.
+	Load(ctx context.Context) (*State, error)
+	// Save replaces the saved state.
+	Save(ctx context.Context, st *State) error
+}
 
-// LoadOrCreateKey reads the Ed25519 key or generates a new one.
-func (s Store) LoadOrCreateKey() (ed25519.PrivateKey, error) {
-	data, err := os.ReadFile(s.path(keyFile))
-	if err == nil {
-		block, _ := pem.Decode(data)
-		if block == nil {
-			return nil, errors.New("cannot read the private key")
-		}
-		k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("invalid private key: %w", err)
-		}
-		key, ok := k.(ed25519.PrivateKey)
-		if !ok {
-			return nil, errors.New("the private key is not Ed25519")
-		}
-		return key, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
+// NewKey generates a new Ed25519 key.
+func NewKey() (ed25519.PrivateKey, error) {
 	_, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return nil, err
-	}
-	out := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(s.path(keyFile), out, 0o600); err != nil {
-		return nil, err
-	}
-	return key, nil
+	return key, err
+}
+
+// HashToken returns the hex SHA-256 of a bootstrap token, ignoring the
+// surrounding whitespace: the token itself is never saved.
+func HashToken(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
 }
 
 // CSR creates a signing request. The backend ignores the subject and uses
@@ -85,68 +74,69 @@ func CSR(key ed25519.PrivateKey) (string, error) {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})), nil
 }
 
-// Registered reports whether a certificate already exists.
-func (s Store) Registered() bool {
-	_, err := os.Stat(s.path(certFile))
-	return err == nil
+// Certificate returns the certificate and key ready for tls.
+func (st *State) Certificate() (*tls.Certificate, error) {
+	block, _ := pem.Decode([]byte(st.CertPEM))
+	if block == nil {
+		return nil, errors.New("cannot read the certificate")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid certificate: %w", err)
+	}
+	pub, ok := leaf.PublicKey.(ed25519.PublicKey)
+	if !ok || !pub.Equal(st.Key.Public()) {
+		return nil, errors.New("certificate and key do not match")
+	}
+	return &tls.Certificate{Certificate: [][]byte{leaf.Raw}, PrivateKey: st.Key, Leaf: leaf}, nil
 }
 
-// Save stores the certificate; caPEM and clusterID are written only if not empty.
-func (s Store) Save(certPEM, caPEM, clusterID string) error {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return err
-	}
-	if err := writeAtomic(s.path(certFile), []byte(certPEM)); err != nil {
-		return err
-	}
-	if caPEM != "" {
-		if err := writeAtomic(s.path(caFile), []byte(caPEM)); err != nil {
-			return err
-		}
-	}
-	if clusterID != "" {
-		if err := writeAtomic(s.path(clusterIDFile), []byte(clusterID)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func writeAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-func (s Store) ClusterID() string {
-	b, _ := os.ReadFile(s.path(clusterIDFile))
-	return strings.TrimSpace(string(b))
-}
-
-// Load returns the certificate and key ready for tls.
-func (s Store) Load() (*tls.Certificate, error) {
-	certPEM, err := os.ReadFile(s.path(certFile))
+// encode turns the state into the saved entries.
+func (st *State) encode() (map[string][]byte, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(st.Key)
 	if err != nil {
 		return nil, err
 	}
-	keyPEM, err := os.ReadFile(s.path(keyFile))
+	data := map[string][]byte{
+		keyKey:       pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}),
+		certKey:      []byte(st.CertPEM),
+		clusterIDKey: []byte(st.ClusterID),
+		tokenHashKey: []byte(st.BootstrapTokenHash),
+	}
+	if st.CAPEM != "" {
+		data[caKey] = []byte(st.CAPEM)
+	}
+	return data, nil
+}
+
+// decode reads the saved entries; without a certificate there is no state.
+func decode(data map[string][]byte) (*State, error) {
+	if len(data[certKey]) == 0 {
+		return nil, nil
+	}
+	block, _ := pem.Decode(data[keyKey])
+	if block == nil {
+		return nil, errors.New("cannot read the private key")
+	}
+	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
+		return nil, fmt.Errorf("invalid private key: %w", err)
+	}
+	key, ok := k.(ed25519.PrivateKey)
+	if !ok {
+		return nil, errors.New("the private key is not Ed25519")
+	}
+	st := &State{
+		Key:                key,
+		CertPEM:            string(data[certKey]),
+		CAPEM:              string(data[caKey]),
+		ClusterID:          strings.TrimSpace(string(data[clusterIDKey])),
+		BootstrapTokenHash: strings.TrimSpace(string(data[tokenHashKey])),
+	}
+	if _, err := st.Certificate(); err != nil {
 		return nil, err
 	}
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("certificate and key do not match: %w", err)
-	}
-	if cert.Leaf == nil {
-		leaf, err := x509.ParseCertificate(cert.Certificate[0])
-		if err != nil {
-			return nil, err
-		}
-		cert.Leaf = leaf
-	}
-	return &cert, nil
+	return st, nil
 }
 
 // NeedsRenewal is true when less than a third of the validity is left.
