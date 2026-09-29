@@ -31,8 +31,9 @@ render all-on \
   --set heartbeatInterval=30s \
   --set 'extraArgs={--log-level=debug}'
 render no-rbac --set rbac.actions=false --set rbac.status=false
-render existing --set bootstrap.existingSecret=my-token
-for f in defaults all-on no-rbac existing; do validate "$f"; done
+render existing --set bootstrap.existingSecret=my-token --set bootstrap.key=tok
+render other-ns --namespace other
+for f in defaults all-on no-rbac existing other-ns; do validate "$f"; done
 
 echo "--- assertions"
 # The identity Secret is kept on uninstall and never carries data in the chart.
@@ -41,6 +42,8 @@ grep -q 'helm.sh/resource-policy: keep' <<<"$identity" || fail "identity Secret 
 ! grep -qE '^(data|stringData):' <<<"$identity" || fail "identity Secret renders data"
 # The agent never acts on its own namespace.
 grep -A4 '"denied_namespaces"' "$out/defaults.yaml" | grep -q '"thumbops"' || fail "release namespace not denied"
+# Other namespaces are also denied: the helper adds the release namespace.
+grep -A4 '"denied_namespaces"' "$out/other-ns.yaml" | grep -q '"other"' || fail "release namespace 'other' not denied"
 # Without the status RBAC the status is turned off.
 grep -q -- '--status=false' "$out/no-rbac.yaml" || fail "--status=false missing"
 ! grep -q 'name: thumbops-agent-status' "$out/no-rbac.yaml" || fail "status ClusterRole rendered"
@@ -54,14 +57,19 @@ grep -q 'name: thumbops-bootstrap' "$out/all-on.yaml" || fail "bootstrap Secret 
 # An existing token Secret is mounted, and the chart does not create one.
 grep -q 'secretName: my-token' "$out/existing.yaml" || fail "existingSecret not mounted"
 ! grep -q 'name: thumbops-bootstrap' "$out/existing.yaml" || fail "bootstrap Secret rendered with existingSecret"
+# bootstrap.key is used only with existingSecret; chart-created Secret always uses key 'token'.
+grep -q -- '--bootstrap-token-file=/etc/thumbops/bootstrap/token' "$out/all-on.yaml" || fail "bootstrap.token should use key 'token'"
+grep -q -- '--bootstrap-token-file=/etc/thumbops/bootstrap/tok' "$out/existing.yaml" || fail "bootstrap.existingSecret with key 'tok' not used"
 
 echo "--- invalid values are rejected"
-for args in "--set foo=bar" "--set policy.foo=1" "--set bootstrap.token=a --set bootstrap.existingSecret=b"; do
-  # shellcheck disable=SC2086
-  if helm template thumbops-agent "$chart" $args >/dev/null 2>&1; then
-    fail "accepted: $args"
-  fi
-done
+# Unknown top-level and policy fields rejected by schema.
+errmsg=$(helm template thumbops-agent "$chart" --set foo=bar 2>&1 || true)
+grep -q "additional properties" <<<"$errmsg" || fail "did not reject foo=bar: $errmsg"
+errmsg=$(helm template thumbops-agent "$chart" --set policy.foo=1 2>&1 || true)
+grep -q "additional properties" <<<"$errmsg" || fail "did not reject policy.foo=1: $errmsg"
+# Both token and existingSecret rejected.
+errmsg=$(helm template thumbops-agent "$chart" --set bootstrap.token=a --set bootstrap.existingSecret=b 2>&1 || true)
+grep -q "not both" <<<"$errmsg" || fail "did not reject token+existingSecret: $errmsg"
 
 echo "--- deploy/agent.yaml up to date"
 hack/gen-manifest.sh

@@ -317,7 +317,7 @@ spec:
           image: "ghcr.io/thumbops/agent:0.1.0"
           imagePullPolicy: IfNotPresent
           args:
-            - --backend-url=https://agent.thumbops.mobiletechnologies.cloud
+            - "--backend-url=https://agent.thumbops.mobiletechnologies.cloud"
             - --policy-file=/etc/thumbops/policy/policy.json
             - --bootstrap-token-file=/etc/thumbops/bootstrap/token
             - --state-secret=thumbops-agent-identity

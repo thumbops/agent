@@ -42,9 +42,9 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - --backend-url={{ .Values.backend.url }}
+            - {{ printf "--backend-url=%s" .Values.backend.url | quote }}
             - --policy-file=/etc/thumbops/policy/policy.json
-            - --bootstrap-token-file=/etc/thumbops/bootstrap/{{ .Values.bootstrap.key }}
+            - --bootstrap-token-file=/etc/thumbops/bootstrap/{{ include "thumbops-agent.bootstrapKey" . }}
             - --state-secret={{ .Values.identity.secretName }}
             - --http-addr=:{{ .Values.http.port }}
             - --log-level={{ .Values.logLevel }}
@@ -61,7 +61,7 @@ spec:
             - --status-interval={{ . }}
             {{- end }}
             {{- range .Values.extraArgs }}
-            - {{ . }}
+            - {{ . | quote }}
             {{- end }}
           ports:
             - name: http

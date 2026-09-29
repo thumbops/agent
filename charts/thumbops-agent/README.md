@@ -26,7 +26,7 @@ and pass `--set bootstrap.existingSecret=<name>` instead.
 | `backend.caBundle` | `""` | PEM of the backend CA; empty = system CAs |
 | `bootstrap.token` | `""` | Single-use token; the chart creates the `thumbops-bootstrap` Secret |
 | `bootstrap.existingSecret` | `""` | Existing Secret with the token (not together with `bootstrap.token`) |
-| `bootstrap.key` | `token` | Key of the token in the Secret |
+| `bootstrap.key` | `token` | Key of the token in `existingSecret` |
 | `identity.secretName` | `thumbops-agent-identity` | Secret with the agent's key and certificate |
 | `policy` | see `values.yaml` | Local policy; the release namespace is always denied |
 | `rbac.actions` | `true` | Permissions for the five actions |

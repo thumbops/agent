@@ -9,7 +9,8 @@ identity in the {{ .Values.identity.secretName }} Secret. To register it:
 {{- end }}
 
 Logs:    kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "thumbops-agent.fullname" . }}
-Health:  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "thumbops-agent.fullname" . }} {{ .Values.http.port }} && curl localhost:{{ .Values.http.port }}/metrics
+Health:  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "thumbops-agent.fullname" . }} {{ .Values.http.port }}
+         in another terminal: curl localhost:{{ .Values.http.port }}/metrics
 
 The {{ .Values.identity.secretName }} Secret is kept on uninstall: reinstall
 with the same release name in this namespace to keep the agent's identity.

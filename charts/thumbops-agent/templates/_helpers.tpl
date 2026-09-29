@@ -32,6 +32,11 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- default "thumbops-bootstrap" .Values.bootstrap.existingSecret }}
 {{- end }}
 
+{{/* The key of the bootstrap token: use bootstrap.key only when existingSecret is set. */}}
+{{- define "thumbops-agent.bootstrapKey" -}}
+{{- if .Values.bootstrap.existingSecret }}{{- .Values.bootstrap.key }}{{- else }}token{{- end }}
+{{- end }}
+
 {{/* The local policy as JSON; the release namespace is always denied. */}}
 {{- define "thumbops-agent.policy" -}}
 {{- $p := deepCopy .Values.policy }}
