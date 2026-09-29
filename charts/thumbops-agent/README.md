@@ -60,20 +60,36 @@ The agent keeps its private key and certificate in the
   be imported"): reuse the release name, or delete the Secret and register
   again with a new bootstrap token.
 
-To register again (cluster revoked, certificate expired), set a new token and
-restart the agent:
+To register again (cluster revoked, certificate expired), set a new token; the
+upgrade restarts the agent by itself (a change of the token or of
+`backend.caBundle` changes a pod annotation):
 
 ```
-helm upgrade thumbops-agent <chart> -n thumbops --reuse-values --set bootstrap.token=<NEW TOKEN>
+helm upgrade thumbops-agent <chart> -n thumbops --reset-then-reuse-values --set bootstrap.token=<NEW TOKEN>
+```
+
+With `bootstrap.existingSecret` put the new token in that Secret and restart
+the agent instead of setting `bootstrap.token`: Helm cannot see the content
+of your Secret, so rotating the token there does not restart the agent.
+
+```
 kubectl -n thumbops rollout restart deploy/thumbops-agent
 ```
+
+Argo CD does not honour `helm.sh/resource-policy: keep`. If you deploy the
+chart with Argo CD, annotate the identity Secret with
+`argocd.argoproj.io/sync-options: Delete=false`, or exclude it from pruning,
+so a sync never deletes the agent's identity.
 
 ### Moving from deploy/agent.yaml to Helm
 
 The identity Secret created by `kubectl apply -f deploy/agent.yaml` has no
 Helm ownership metadata. Delete the other manifest resources, then either
 delete the Secret too (the agent registers again with a new token), or let
-Helm adopt it:
+Helm adopt it. The `thumbops-bootstrap` Secret you created by hand must go
+too, or be reused with `--set bootstrap.existingSecret=thumbops-bootstrap`;
+otherwise `helm install --set bootstrap.token=...` fails with "exists and
+cannot be imported".
 
 ```
 kubectl -n thumbops label secret thumbops-agent-identity app.kubernetes.io/managed-by=Helm

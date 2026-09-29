@@ -59,7 +59,15 @@ grep -q 'secretName: my-token' "$out/existing.yaml" || fail "existingSecret not 
 ! grep -q 'name: thumbops-bootstrap' "$out/existing.yaml" || fail "bootstrap Secret rendered with existingSecret"
 # bootstrap.key is used only with existingSecret; chart-created Secret always uses key 'token'.
 grep -q -- '--bootstrap-token-file=/etc/thumbops/bootstrap/token' "$out/all-on.yaml" || fail "bootstrap.token should use key 'token'"
-grep -q -- '--bootstrap-token-file=/etc/thumbops/bootstrap/tok' "$out/existing.yaml" || fail "bootstrap.existingSecret with key 'tok' not used"
+grep -Eq -- '--bootstrap-token-file=/etc/thumbops/bootstrap/tok"?$' "$out/existing.yaml" || fail "bootstrap.existingSecret with key 'tok' not used"
+# The agent reads the token and the backend CA only at startup: a change restarts it.
+grep -q 'checksum/bootstrap:' "$out/defaults.yaml" || fail "checksum/bootstrap annotation missing"
+grep -q 'checksum/backend-ca:' "$out/defaults.yaml" || fail "checksum/backend-ca annotation missing"
+render token-a --set bootstrap.token=token-a
+render token-b --set bootstrap.token=token-b
+sum_a=$(grep 'checksum/bootstrap:' "$out/token-a.yaml")
+sum_b=$(grep 'checksum/bootstrap:' "$out/token-b.yaml")
+[[ $sum_a != "$sum_b" ]] || fail "checksum/bootstrap does not change with the token"
 
 echo "--- invalid values are rejected"
 # Unknown top-level and policy fields rejected by schema.

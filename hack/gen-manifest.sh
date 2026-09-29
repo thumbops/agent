@@ -26,6 +26,10 @@ cd "$(dirname "$0")/.."
 # different from the one used for the saved identity triggers a new
 # registration. For other options (dashboard only, no actions, backend CA,
 # metrics Service) install with Helm: see charts/thumbops-agent/README.md.
+#
+# The resources carry Helm labels (app.kubernetes.io/managed-by: Helm) because
+# they are rendered from the chart; applied with kubectl they are not managed
+# by Helm.
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -133,7 +133,8 @@ renewal and rejected certificates.
 ### End-to-end tests on kind
 
 `test/e2e/run.sh` installs the agent with the Helm chart (`test/e2e/values.yaml`
-sets only the image, backend URL and intervals) next to the mock backend in
+sets the image, the backend URL, the bootstrap token, the intervals and the
+node selector; the backend CA is passed with `--set-file`) next to the mock backend in
 HTTPS with mTLS. It then checks registration, scale,
 rollout-restart, cordon, drain, uncordon, two policy rejections, a
 certificate renewal, the agent's permissions on Secrets, the identity kept
@@ -147,10 +148,23 @@ test/e2e/run.sh
 kind delete cluster --name thumbops-e2e
 ```
 
-CI (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `go test -race` and
-the end-to-end tests on every pull request, and builds the multi-arch image.
-Pushes to `main` publish `ghcr.io/thumbops/agent:edge`, and `v*` tags publish
-the version.
+CI (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `go test -race`, the
+chart checks (`test/chart/check.sh`) and the end-to-end tests on every pull
+request, and builds the multi-arch image. Pushes to `main` publish
+`ghcr.io/thumbops/agent:edge`, and `v*` tags publish the version of the image
+together with the chart, to `oci://ghcr.io/thumbops/charts`.
+
+### Releasing
+
+1. Set `version` and `appVersion` in `charts/thumbops-agent/Chart.yaml` to
+   X.Y.Z.
+2. Run `hack/gen-manifest.sh` and commit the chart and `deploy/agent.yaml`.
+3. Tag `vX.Y.Z` and push the tag. The `image` job fails before pushing
+   anything if `Chart.yaml` does not match the tag.
+
+A package created on ghcr.io by the workflow is private by default: make the
+image and the chart public once, so `docker pull` and `helm install` work
+anonymously.
 
 ## Installing
 

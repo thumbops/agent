@@ -17,6 +17,10 @@
 # different from the one used for the saved identity triggers a new
 # registration. For other options (dashboard only, no actions, backend CA,
 # metrics Service) install with Helm: see charts/thumbops-agent/README.md.
+#
+# The resources carry Helm labels (app.kubernetes.io/managed-by: Helm) because
+# they are rendered from the chart; applied with kubectl they are not managed
+# by Helm.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -301,6 +305,10 @@ spec:
       annotations:
         # The agent reads the policy at startup: restart it when it changes.
         checksum/policy: 1493ecf5910c2e25406401f225fbd31d88b5fe1f1ccd48b1183d175b4ce4ddbd
+        # It also reads the bootstrap token and the backend CA only at startup.
+        # With existingSecret Helm cannot see the token: rotate it and restart by hand.
+        checksum/bootstrap: e3e4c05ae93930ff23e2502efaf0a654327f67995b9267d00be61f1c837afee0
+        checksum/backend-ca: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         prometheus.io/path: /metrics
         prometheus.io/port: "9090"
         prometheus.io/scrape: "true"

@@ -237,8 +237,12 @@ run_action succeeded '{"type":"scale","params":{"namespace":"default","deploymen
 
 log "new bootstrap token: the agent registers again"
 backend POST /debug/bootstrap-tokens '{"token":"e2e-bootstrap-token-2"}' >/dev/null
+# The token is part of the pod template (checksum/bootstrap): the upgrade
+# replaces the pod by itself, so no restart is needed.
+old=$(kubectl -n thumbops get pods -l app.kubernetes.io/name=thumbops-agent -o name)
 helm_agent upgrade --reuse-values --set bootstrap.token=e2e-bootstrap-token-2 >/dev/null
-restart_agent
+kubectl -n thumbops wait --for=delete $old --timeout=120s
+wait_for "agent start" 60 agent_logged '"agent started"'
 agent_logged '"agent registered"'
 [[ $(identity_field 'key\.pem') != "$key_before" ]]
 run_action succeeded '{"type":"scale","params":{"namespace":"default","deployment":"web","replicas":3}}'

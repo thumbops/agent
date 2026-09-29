@@ -81,6 +81,17 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7
+      - name: Check that Chart.yaml matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          for field in version appVersion; do
+            value=$(awk -v f="$field:" '$1 == f { gsub(/["'"'"']/, "", $2); print $2 }' charts/thumbops-agent/Chart.yaml)
+            if [ "$value" != "$version" ]; then
+              echo "Chart.yaml $field is '$value' but the tag is $GITHUB_REF_NAME: bump it, run hack/gen-manifest.sh, commit and tag again" >&2
+              exit 1
+            fi
+          done
       - uses: docker/setup-buildx-action@v4
       - uses: docker/metadata-action@v6
         id: meta
@@ -123,8 +134,10 @@ jobs:
       - name: Package and push the chart
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
         run: |
           version=${GITHUB_REF_NAME#v}
-          echo "$GITHUB_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          helm package charts/thumbops-agent --version "$version" --app-version "$version" -d dist
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
+          # Chart.yaml version and appVersion equal the tag: the image job checked it.
+          helm package charts/thumbops-agent -d dist
           helm push "dist/thumbops-agent-$version.tgz" oci://ghcr.io/thumbops/charts

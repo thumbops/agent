@@ -23,6 +23,10 @@ spec:
       annotations:
         # The agent reads the policy at startup: restart it when it changes.
         checksum/policy: {{ include "thumbops-agent.policy" . | sha256sum }}
+        # It also reads the bootstrap token and the backend CA only at startup.
+        # With existingSecret Helm cannot see the token: rotate it and restart by hand.
+        checksum/bootstrap: {{ .Values.bootstrap.token | default (printf "%s/%s" .Values.bootstrap.existingSecret (include "thumbops-agent.bootstrapKey" .)) | sha256sum }}
+        checksum/backend-ca: {{ .Values.backend.caBundle | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

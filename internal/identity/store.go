@@ -13,7 +13,7 @@ import (
 )
 
 // SecretStore keeps the state in a Secret of the agent's namespace. The
-// Secret is created empty by the manifest: the agent only needs get and
+// Secret is created empty by the Helm chart (or deploy/agent.yaml): the agent only needs get and
 // update on that one Secret, never create.
 type SecretStore struct {
 	Client    kubernetes.Interface
