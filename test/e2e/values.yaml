@@ -1,0 +1,14 @@
+# Values for the end-to-end tests on kind (test/e2e/run.sh). The backend CA
+# is passed with --set-file backend.caBundle=<mock backend certificate>.
+image:
+  repository: thumbops/agent
+  tag: e2e
+  pullPolicy: Never
+backend:
+  url: https://mock-backend.thumbops-e2e.svc:8443
+bootstrap:
+  token: e2e-bootstrap-token
+heartbeatInterval: 5s
+statusInterval: 10s
+nodeSelector:
+  thumbops-e2e: infra
