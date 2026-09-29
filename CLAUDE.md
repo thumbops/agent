@@ -102,8 +102,8 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
   keeps the old certificate in use. Key and certificate are always saved
   together. The token is never saved, only its SHA-256.
 - **The agent can only get and update its identity Secret.** The chart
-  creates it empty (and so does the generated deploy/agent.yaml); no `create` and no access to other Secrets (checked by
-  the end-to-end tests).
+  creates it empty (and so does the generated deploy/agent.yaml); no `create`
+  and no access to other Secrets (checked by the end-to-end tests).
 - **`deploy/agent.yaml` is generated.** Change the chart and run
   `hack/gen-manifest.sh`; `test/chart/check.sh` fails if the committed
   manifest differs. The identity Secret stays empty in the chart with
