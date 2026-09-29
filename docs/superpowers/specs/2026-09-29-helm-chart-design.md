@@ -45,7 +45,8 @@ pipeline overrides both). `kubeVersion` is not constrained.
   `nameOverride`/`fullnameOverride`. With the release name `thumbops-agent`
   the names are the ones of today's manifest (ServiceAccount, Deployment,
   ClusterRoles `thumbops-agent-actions` / `thumbops-agent-status`, their
-  bindings, Role and RoleBinding `thumbops-agent-identity`).
+  bindings, Role and RoleBinding `thumbops-agent-identity`), plus the new
+  ClusterRole `thumbops-agent-base` (see "RBAC").
 - Two names are fixed by value, not by release: the identity Secret
   (`identity.secretName`, default `thumbops-agent-identity`) and the
   bootstrap Secret (`thumbops-bootstrap` unless `bootstrap.existingSecret`).
@@ -123,6 +124,19 @@ security contexts, probes, `metrics.serviceMonitor.labels`). The `policy`
 object lists exactly the agent's policy fields. A misspelled value is a
 `helm install` error, as unknown policy fields are an agent startup error.
 
+## RBAC
+
+- `<fullname>-base` (always rendered): `get` on the `kube-system` namespace
+  (cluster identification at registration) and `list` on nodes (node counts
+  in the heartbeat). Today these rules live in the actions ClusterRole, so
+  an install without it (which the current manifest comment suggests for a
+  dashboard-only agent) could not even register.
+- `<fullname>-actions` (`rbac.actions`): deployments `get`/`patch`; nodes
+  `get`/`list`/`patch`; pods `get`/`list`; `pods/eviction` `create`.
+- `<fullname>-status` (`rbac.status`): nodes and pods, deployments
+  `get`/`list`/`watch`.
+- Role `<fullname>-identity`: see below.
+
 ## Identity Secret
 
 - Rendered empty (no `data`, `type: Opaque`) with the annotation
@@ -178,11 +192,12 @@ Run in CI and locally; fails on the first error.
    -summary` (`-ignore-missing-schemas` for the ServiceMonitor):
    defaults; everything on (`backend.caBundle`, `bootstrap.token`,
    `metrics.serviceMonitor.enabled`, `heartbeatInterval`, `extraArgs`);
-   `rbac.actions=false,rbac.status=false`.
+   `rbac.actions=false,rbac.status=false`; `bootstrap.existingSecret`.
 3. Assertions on the rendered output:
    - the identity Secret has `helm.sh/resource-policy: keep` and no `data`;
-   - with `rbac.status=false` the args contain `--status=false` and there
-     is no `thumbops-agent-status` ClusterRole;
+   - with `rbac.actions=false,rbac.status=false` the args contain
+     `--status=false`, there is no actions or status ClusterRole, and the
+     base ClusterRole is still there;
    - with `bootstrap.existingSecret=my-token` the bootstrap volume uses
      `my-token` and no `thumbops-bootstrap` Secret is rendered;
    - with `bootstrap.token` and `bootstrap.existingSecret` both set, the
