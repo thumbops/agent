@@ -654,3 +654,139 @@ func TestInterruptedDrainOfAnActionTheBackendNoLongerTracks(t *testing.T) {
 		t.Fatal("the node must stay cordoned")
 	}
 }
+
+// interruptDrain leaves worker-1 as a drain of d1 interrupted by a restart:
+// the in-progress annotation, and the node cordoned or not.
+func interruptDrain(e *env, cordoned bool) {
+	state, _ := json.Marshal(map[string]any{"action_id": "d1", "started_at": time.Now().Add(-time.Second).UTC(), "timeout_seconds": 30})
+	e.fk.PatchNodeForTest("worker-1", map[string]any{"spec": map[string]any{"unschedulable": cordoned},
+		"metadata": map[string]any{"annotations": map[string]any{actions.AnnotationDrainInProgress: string(state)}}})
+}
+
+func annotated(e *env) bool {
+	_, ok := e.fk.Node("worker-1").Metadata.Annotations[actions.AnnotationDrainInProgress]
+	return ok
+}
+
+// The action expired or was cancelled while the agent was down, and someone
+// uncordoned the node: the resume must not cordon it again.
+func TestResumeOfACancelledActionLeavesTheNodeAsItIs(t *testing.T) {
+	e := newEnv(t, nil)
+	e.fk.AddPod(podOn("payments", "api-1", "worker-1"))
+	interruptDrain(e, false)
+	e.mb.EnqueueClaimed(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 30}})
+	e.mb.Cancel("d1")
+
+	stop := e.run(t)
+	defer stop()
+	waitUntil(t, func() bool { return !annotated(e) })
+	if e.fk.Node("worker-1").Spec.Unschedulable {
+		t.Fatal("the node uncordoned by hand must stay schedulable")
+	}
+	if n := len(e.fk.Evictions()); n != 0 {
+		t.Fatalf("no pod may be evicted, got %d", n)
+	}
+	if _, ok := e.mb.Result("d1"); ok {
+		t.Fatal("no result must be sent for a cancelled action")
+	}
+}
+
+// A 404 on the first progress of a resume: the backend cannot confirm the
+// action, so the drain is abandoned and the node left as it is.
+func TestResumeTheBackendCannotConfirmIsAbandoned(t *testing.T) {
+	e := newEnv(t, nil)
+	e.fk.AddPod(podOn("payments", "api-1", "worker-1"))
+	interruptDrain(e, false) // d1 is unknown to the backend
+
+	stop := e.run(t)
+	defer stop()
+	waitUntil(t, func() bool { return !annotated(e) })
+	if e.fk.Node("worker-1").Spec.Unschedulable {
+		t.Fatal("the node must be left as it is")
+	}
+	if n := len(e.fk.Evictions()); n != 0 {
+		t.Fatalf("no pod may be evicted, got %d", n)
+	}
+}
+
+func TestResumeIsCheckedAgainstTheCurrentPolicy(t *testing.T) {
+	for name, pol := range map[string]*policy.Policy{
+		"drain no longer allowed": {AllowedActions: []string{protocol.ActionCordon, protocol.ActionUncordon}},
+		"default deny":            {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, pol)
+			e.fk.AddPod(podOn("payments", "api-1", "worker-1"))
+			interruptDrain(e, true)
+			e.mb.EnqueueClaimed(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 30}})
+
+			stop := e.run(t)
+			defer stop()
+			res, ok := e.mb.WaitResult("d1", 5*time.Second)
+			if !ok || res.Status != protocol.StatusRejected {
+				t.Fatalf("a resume the policy no longer allows must be rejected: %+v %v", res, ok)
+			}
+			if annotated(e) {
+				t.Fatal("the in-progress annotation must be removed")
+			}
+			if n := len(e.fk.Evictions()); n != 0 {
+				t.Fatalf("no pod may be evicted, got %d", n)
+			}
+			if !e.fk.Node("worker-1").Spec.Unschedulable {
+				t.Fatal("the node must be left as it is (cordoned)")
+			}
+		})
+	}
+}
+
+// A 401 on progress stops the drain; the annotation stays so that the drain
+// resumes after a new registration, and no result is sent.
+func TestDrainStopsOnUnauthorizedProgress(t *testing.T) {
+	e := newEnv(t, nil, func(c *Config) {
+		c.ProgressMinGap = time.Millisecond
+		c.ProgressMaxGap = 50 * time.Millisecond
+	})
+	e.fk.AddPod(podOn("payments", "db-0", "worker-1"))
+	e.fk.BlockEviction("payments", "db-0", -1)
+	e.mb.Enqueue(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 30}})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.agent.handle(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain,
+			Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 30}, ExpiresAt: time.Now().Add(time.Minute)})
+	}()
+	waitUntil(t, func() bool { _, n := e.mb.Progress("d1"); return n >= 1 })
+	e.mb.SetProgressStatus(http.StatusUnauthorized)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain did not stop on 401")
+	}
+	evictions := len(e.fk.Evictions())
+	time.Sleep(100 * time.Millisecond)
+	if n := len(e.fk.Evictions()); n != evictions {
+		t.Fatalf("no eviction after the stop: %d then %d", evictions, n)
+	}
+	if !annotated(e) {
+		t.Fatal("the in-progress annotation must be kept for the resume")
+	}
+	if _, ok := e.mb.Result("d1"); ok {
+		t.Fatal("no result must be sent after a 401")
+	}
+}
+
+func TestResultIsNotRetriedOn401(t *testing.T) {
+	e := newEnv(t, nil)
+	e.mb.EnqueueClaimed(protocol.Action{ActionID: "r1", Type: protocol.ActionCordon})
+	e.mb.SetResultStatus(http.StatusUnauthorized)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.agent.sendResult(context.Background(), "r1", protocol.Result{Status: protocol.StatusSucceeded}, e.agent.log)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendResult must give up on 401")
+	}
+}

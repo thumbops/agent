@@ -537,3 +537,30 @@ func TestUncordonEndsADrainInProgress(t *testing.T) {
 		t.Fatalf("uncordon must clear the drain in progress: %+v", n)
 	}
 }
+
+// A resumed drain changes nothing until the backend accepts its first
+// progress: if the action is gone meanwhile, a node uncordoned by hand stays
+// schedulable.
+func TestDrainResumeStoppedBeforeAnyChange(t *testing.T) {
+	fk, e := setup(t)
+	fk.AddNode("worker-1", true, nil)
+	fk.AddPod(pod("payments", "api-1", "worker-1", ctrl("ReplicaSet", "api-rs")))
+	state, _ := json.Marshal(map[string]any{"action_id": "d1", "started_at": time.Now().UTC(), "timeout_seconds": 60})
+	fk.PatchNodeForTest("worker-1", map[string]any{"spec": map[string]any{"unschedulable": false},
+		"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: string(state)}}})
+	ctx, cancel := context.WithCancelCause(context.Background())
+	progress := func(protocol.Progress) { cancel(ErrActionGone) } // the first progress is refused
+	r := e.Execute(ctx, protocol.Action{ActionID: "d1", Type: protocol.ActionDrain,
+		Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 60}}, progress)
+	expectStatus(t, r, protocol.StatusFailed)
+	n := fk.Node("worker-1")
+	if n.Spec.Unschedulable {
+		t.Fatal("a resume the backend no longer authorizes must not cordon the node")
+	}
+	if inProgress(t, n) != nil {
+		t.Fatalf("the in-progress annotation must be removed: %+v", n.Metadata.Annotations)
+	}
+	if len(fk.Evictions()) != 0 {
+		t.Fatalf("no eviction: %v", fk.Evictions())
+	}
+}

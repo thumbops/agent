@@ -351,34 +351,6 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 			toEvict = append(toEvict, p)
 		}
 	}
-	if len(blockers) > 0 && !resumed {
-		r := e.failed(start, "drain aborted before cordoning, the node was not changed: %s", strings.Join(blockers, "; "))
-		r.Details = map[string]any{"blocking_pods": blockers}
-		return r
-	}
-	if len(blockers) > 0 {
-		r := e.failed(start, "drain of %s aborted on resume: %s; the node stays cordoned", node, strings.Join(blockers, "; "))
-		r.Details = map[string]any{"blocking_pods": blockers}
-		return e.finishDrain(ctx, a, node, r)
-	}
-
-	if resumed {
-		// Re-assert the cordon: the node may have been uncordoned by hand
-		// while the agent was down.
-		if _, err := e.Kube.PatchNode(ctx, node, map[string]any{"spec": map[string]any{"unschedulable": true}}); err != nil {
-			return e.failed(start, "%s", describe(err, what))
-		}
-	} else {
-		state, _ := json.Marshal(drainState{ActionID: a.ActionID, StartedAt: start, TimeoutSeconds: int(total / time.Second),
-			DeleteEmptyDirData: a.Params.DeleteEmptyDirData})
-		patch := map[string]any{
-			"spec":     map[string]any{"unschedulable": true},
-			"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: string(state)}},
-		}
-		if _, err := e.Kube.PatchNode(ctx, node, patch); err != nil {
-			return e.failed(start, "%s", describe(err, what))
-		}
-	}
 	report := func(evicted, remaining int, blocked []kube.Pod, waiting bool) {
 		if progress == nil {
 			return
@@ -397,7 +369,41 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 		progress(protocol.Progress{UpdatedAt: e.Now().UTC(), Message: msg,
 			Details: map[string]any{"evicted": evicted, "remaining": remaining, "blocked": list}})
 	}
-	report(0, len(toEvict), nil, false)
+	if resumed {
+		// A resumed drain changes nothing until the backend accepts its
+		// first progress: the action may have expired or been cancelled
+		// while the agent was down.
+		report(0, len(toEvict), nil, false)
+		if ctx.Err() != nil {
+			return e.finishDrain(ctx, a, node, e.failed(start, "drain of %s stopped", node))
+		}
+		// Re-assert the cordon: the node may have been uncordoned by hand
+		// while the agent was down.
+		if _, err := e.Kube.PatchNode(ctx, node, map[string]any{"spec": map[string]any{"unschedulable": true}}); err != nil {
+			return e.failed(start, "%s", describe(err, what))
+		}
+		if len(blockers) > 0 {
+			r := e.failed(start, "drain of %s aborted on resume: %s; the node stays cordoned", node, strings.Join(blockers, "; "))
+			r.Details = map[string]any{"blocking_pods": blockers}
+			return e.finishDrain(ctx, a, node, r)
+		}
+	} else {
+		if len(blockers) > 0 {
+			r := e.failed(start, "drain aborted before cordoning, the node was not changed: %s", strings.Join(blockers, "; "))
+			r.Details = map[string]any{"blocking_pods": blockers}
+			return r
+		}
+		state, _ := json.Marshal(drainState{ActionID: a.ActionID, StartedAt: start, TimeoutSeconds: int(total / time.Second),
+			DeleteEmptyDirData: a.Params.DeleteEmptyDirData})
+		patch := map[string]any{
+			"spec":     map[string]any{"unschedulable": true},
+			"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: string(state)}},
+		}
+		if _, err := e.Kube.PatchNode(ctx, node, patch); err != nil {
+			return e.failed(start, "%s", describe(err, what))
+		}
+		report(0, len(toEvict), nil, false)
+	}
 	if left <= 0 {
 		return e.finishDrain(ctx, a, node, e.drainTimeout(start, node, total, toEvict))
 	}
@@ -480,7 +486,7 @@ func (e *Executor) finishDrain(ctx context.Context, a protocol.Action, node stri
 		cause := context.Cause(ctx)
 		res = e.failed(res.StartedAt, "drain of %s stopped: %v; the node stays cordoned", node, cause)
 		if errors.Is(cause, ErrActionGone) {
-			_, _ = e.Kube.PatchNode(context.WithoutCancel(ctx), node, map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: nil}}})
+			_ = e.AbandonDrain(context.WithoutCancel(ctx), node)
 		}
 		return res
 	}
@@ -495,6 +501,13 @@ func (e *Executor) finishDrain(ctx context.Context, a protocol.Action, node stri
 		res.Details["annotation_error"] = describe(err, "node "+node)
 	}
 	return res
+}
+
+// AbandonDrain removes the in-progress annotation of a drain that must not
+// be resumed, and changes nothing else: the node stays as it is.
+func (e *Executor) AbandonDrain(ctx context.Context, node string) error {
+	_, err := e.Kube.PatchNode(ctx, node, map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: nil}}})
+	return err
 }
 
 func (e *Executor) isSelf(p kube.Pod) bool {

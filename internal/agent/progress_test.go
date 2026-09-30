@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -69,5 +70,65 @@ func TestReporterStopsReportingOn404(t *testing.T) {
 	}
 	if !r.disabled {
 		t.Fatal("a 404 must stop further progress for the action")
+	}
+}
+
+// A resumed drain needs the backend to accept its first progress: a 404 means
+// the backend cannot confirm the action, so it is abandoned.
+func TestReporterFirstAckRequiredStopsOn404(t *testing.T) {
+	_, b := newReporterEnv(t) // action unknown to the backend: 404
+	ctx, cancel := context.WithCancelCause(context.Background())
+	r := newProgressReporter(ctx, b, "d1", cancel, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)), 5*time.Second, 30*time.Second)
+	r.requireFirstAck = true
+	r.report(protocol.Progress{Message: "a"})
+	if !errors.Is(context.Cause(ctx), actions.ErrActionGone) {
+		t.Fatalf("a 404 on the first progress of a resume must cancel with ErrActionGone, got %v", context.Cause(ctx))
+	}
+}
+
+func TestReporterFirstAckRequiredGivesUpAfterRetries(t *testing.T) {
+	mb, b := newReporterEnv(t)
+	mb.EnqueueClaimed(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain})
+	mb.SetProgressStatus(http.StatusServiceUnavailable)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	r := newProgressReporter(ctx, b, "d1", cancel, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)), 5*time.Second, 30*time.Second)
+	r.requireFirstAck = true
+	r.firstAckRetry = time.Millisecond
+	r.report(protocol.Progress{Message: "a"})
+	if !errors.Is(context.Cause(ctx), actions.ErrActionGone) {
+		t.Fatalf("a first progress that keeps failing must cancel with ErrActionGone, got %v", context.Cause(ctx))
+	}
+}
+
+func TestReporterFirstAckRequiredRetriesTransientErrors(t *testing.T) {
+	mb, b := newReporterEnv(t)
+	mb.EnqueueClaimed(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain})
+	mb.SetProgressStatus(http.StatusServiceUnavailable)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	r := newProgressReporter(ctx, b, "d1", cancel, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)), 5*time.Second, 30*time.Second)
+	r.requireFirstAck = true
+	r.firstAckRetry = 200 * time.Millisecond
+	go func() { time.Sleep(100 * time.Millisecond); mb.SetProgressStatus(0) }()
+	r.report(protocol.Progress{Message: "a"})
+	if ctx.Err() != nil {
+		t.Fatalf("a transient error must be retried, got %v", context.Cause(ctx))
+	}
+	if _, n := mb.Progress("d1"); n != 1 {
+		t.Fatalf("the retried progress must reach the backend, got %d", n)
+	}
+}
+
+// 401 stops the action without ErrActionGone: the drain keeps its annotation
+// and resumes after a new registration.
+func TestReporterUnauthorizedStopsTheAction(t *testing.T) {
+	mb, b := newReporterEnv(t)
+	mb.EnqueueClaimed(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain})
+	mb.SetProgressStatus(http.StatusUnauthorized)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	r := newProgressReporter(ctx, b, "d1", cancel, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)), 5*time.Second, 30*time.Second)
+	r.report(protocol.Progress{Message: "a"})
+	cause := context.Cause(ctx)
+	if !errors.Is(cause, errUnauthorized) || errors.Is(cause, actions.ErrActionGone) {
+		t.Fatalf("a 401 must cancel with errUnauthorized, got %v", cause)
 	}
 }

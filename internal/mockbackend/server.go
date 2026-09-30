@@ -52,11 +52,13 @@ type Server struct {
 	statusRequested bool
 	statusCode      int // if not 0, PUT /v1/agent/status responds with this status
 	heartbeatCode   int // if not 0, PUT /v1/agent/heartbeat responds with this status
+	resultCode      int // if not 0, the result endpoint responds with this status
 
 	// Behaviors configurable in tests.
 	Poll           protocol.PollConfig
 	ClaimOverride  map[string]int // action_id → HTTP status to return on claim
 	PollStatus     int            // if not 0, polling responds with this status
+	ProgressStatus int            // if not 0, progress responds with this status
 	ResultFailures int            // how many times to respond 503 when the result is sent
 	ClaimLease     time.Duration  // lease of a claimed action, renewed by progress
 	BootstrapToken string
@@ -197,6 +199,10 @@ func (s *Server) progressHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if code := s.ProgressStatus; code != 0 {
+		http.Error(w, http.StatusText(code), code)
+		return
+	}
 	s.expireLeases()
 	e, ok := s.byID[id]
 	switch {
@@ -224,6 +230,21 @@ func (s *Server) debugCancel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) SetPollStatus(code int) {
 	s.mu.Lock()
 	s.PollStatus = code
+	s.mu.Unlock()
+}
+
+// SetProgressStatus makes progress respond with code (0 = normal), even
+// while the server is in use.
+func (s *Server) SetProgressStatus(code int) {
+	s.mu.Lock()
+	s.ProgressStatus = code
+	s.mu.Unlock()
+}
+
+// SetResultStatus makes the result endpoint respond with code (0 = normal).
+func (s *Server) SetResultStatus(code int) {
+	s.mu.Lock()
+	s.resultCode = code
 	s.mu.Unlock()
 }
 
@@ -554,6 +575,10 @@ func (s *Server) result(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.resultCode != 0 {
+		http.Error(w, http.StatusText(s.resultCode), s.resultCode)
+		return
+	}
 	if s.ResultFailures > 0 {
 		s.ResultFailures--
 		http.Error(w, "backend temporarily unavailable", http.StatusServiceUnavailable)
