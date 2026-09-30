@@ -39,6 +39,9 @@ type Config struct {
 	// Metrics and Health are optional (nil records nothing).
 	Metrics *metrics.Metrics
 	Health  *health.State
+	// Progress throttling (defaults 5s and 30s).
+	ProgressMinGap time.Duration
+	ProgressMaxGap time.Duration
 }
 
 // StatusSource builds the cluster status summary; ok is false while it is
@@ -95,6 +98,12 @@ func New(cfg Config, b *backend.Client, k *kube.Client, exec *actions.Executor, 
 	if cfg.StatusRetry == 0 {
 		cfg.StatusRetry = 5 * time.Second
 	}
+	if cfg.ProgressMinGap == 0 {
+		cfg.ProgressMinGap = 5 * time.Second
+	}
+	if cfg.ProgressMaxGap == 0 {
+		cfg.ProgressMaxGap = 30 * time.Second
+	}
 	return &Agent{
 		cfg: cfg, backend: b, kube: k, exec: exec, policy: pol, log: cfg.Logger,
 		poll:      protocol.PollConfig{WaitSeconds: 20},
@@ -146,6 +155,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 		}
 	}()
+
+	a.resumeDrains(ctx)
 
 	backoff := a.cfg.InitialBackoff
 	for {
@@ -265,25 +276,100 @@ func (a *Agent) handle(ctx context.Context, act protocol.Action) {
 
 	var res protocol.Result
 	if err := a.checkPolicy(ctx, act); err != nil {
-		now := a.cfg.Now().UTC()
-		res = protocol.Result{Status: protocol.StatusRejected, StartedAt: now, FinishedAt: now, Message: err.Error()}
 		log.Warn("action rejected by the local policy", "reason", err)
-		a.cfg.Metrics.ActionOutcome(act.Type, protocol.StatusRejected)
+		res = a.rejected(act, err)
 	} else {
-		log.Info("running action", "params", act.Params, "requested_by", act.RequestedBy)
-		a.cfg.Metrics.ActionRunning(true)
-		start := time.Now()
-		res = a.exec.Execute(ctx, act)
-		a.cfg.Metrics.ObserveActionDuration(act.Type, time.Since(start))
-		a.cfg.Metrics.ActionRunning(false)
-		a.cfg.Metrics.ActionOutcome(act.Type, res.Status)
-		log.Info("action finished", "status", res.Status, "message", res.Message)
+		var send bool
+		if res, send = a.execute(ctx, act, log, false); !send {
+			return
+		}
 	}
 
 	a.sendResult(ctx, act.ActionID, res, log)
 	a.mu.Lock()
 	a.lastActionID = act.ActionID
 	a.mu.Unlock()
+}
+
+// rejected builds the result of an action the local policy rejects and
+// records its outcome.
+func (a *Agent) rejected(act protocol.Action, reason error) protocol.Result {
+	now := a.cfg.Now().UTC()
+	a.cfg.Metrics.ActionOutcome(act.Type, protocol.StatusRejected)
+	return protocol.Result{Status: protocol.StatusRejected, StartedAt: now, FinishedAt: now, Message: reason.Error()}
+}
+
+// execute runs an action with a progress reporter. send is false when no
+// result must be sent: the backend stopped tracking the action (409/410 on
+// progress, or a resumed drain it did not confirm), the backend rejects the
+// agent certificate, or the agent is shutting down. resumed marks a drain
+// resumed after a restart: its first progress must be accepted.
+func (a *Agent) execute(ctx context.Context, act protocol.Action, log *slog.Logger, resumed bool) (res protocol.Result, send bool) {
+	actx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	rep := newProgressReporter(actx, a.backend, act.ActionID, cancel, a.serverNow, log, a.cfg.ProgressMinGap, a.cfg.ProgressMaxGap)
+	rep.requireFirstAck = resumed
+	log.Info("running action", "params", act.Params, "requested_by", act.RequestedBy)
+	a.cfg.Metrics.ActionRunning(true)
+	start := time.Now()
+	res = a.exec.Execute(actx, act, rep.report)
+	a.cfg.Metrics.ObserveActionDuration(act.Type, time.Since(start))
+	a.cfg.Metrics.ActionRunning(false)
+	cause := context.Cause(actx)
+	switch {
+	case errors.Is(cause, actions.ErrActionGone):
+		a.cfg.Metrics.ActionOutcome(act.Type, metrics.OutcomeDiscarded)
+		log.Warn("action stopped: the backend no longer tracks it, no result sent")
+		return res, false
+	case errors.Is(cause, errUnauthorized):
+		log.Error("action interrupted: the backend rejects the agent certificate")
+		return res, false
+	case ctx.Err() != nil:
+		log.Info("action interrupted by shutdown; it will be resumed")
+		return res, false
+	}
+	a.cfg.Metrics.ActionOutcome(act.Type, res.Status)
+	log.Info("action finished", "status", res.Status, "message", res.Message)
+	return res, true
+}
+
+// resumeDrains finishes the drains interrupted by a restart (nodes with the
+// drain-in-progress annotation), without a new claim. The current local
+// policy is checked again, and the drain changes nothing until the backend
+// accepts its first progress.
+func (a *Agent) resumeDrains(ctx context.Context) {
+	acts, dropped, err := a.exec.InProgressDrains(ctx)
+	if err != nil {
+		a.log.Warn("cannot look for interrupted drains", "err", err)
+		return
+	}
+	for _, node := range dropped {
+		a.log.Warn("unreadable drain-in-progress annotation removed; the node stays cordoned", "node", node)
+	}
+	for _, act := range acts {
+		if ctx.Err() != nil {
+			return
+		}
+		log := a.log.With("action_id", act.ActionID, "type", act.Type)
+		var res protocol.Result
+		if err := a.checkPolicy(ctx, act); err != nil {
+			log.Warn("interrupted drain rejected by the local policy", "node", act.Params.Node, "reason", err)
+			if aerr := a.exec.AbandonDrain(ctx, act.Params.Node); aerr != nil {
+				log.Error("cannot remove the drain-in-progress annotation", "node", act.Params.Node, "err", aerr)
+			}
+			res = a.rejected(act, err)
+		} else {
+			log.Info("resuming an interrupted drain", "node", act.Params.Node)
+			var send bool
+			if res, send = a.execute(ctx, act, log, true); !send {
+				continue
+			}
+		}
+		a.sendResult(ctx, act.ActionID, res, log)
+		a.mu.Lock()
+		a.lastActionID = act.ActionID
+		a.mu.Unlock()
+	}
 }
 
 func (a *Agent) checkPolicy(ctx context.Context, act protocol.Action) error {
@@ -300,12 +386,18 @@ func (a *Agent) checkPolicy(ctx context.Context, act protocol.Action) error {
 	return nil
 }
 
-// sendResult retries until the backend confirms: the result must never be lost.
+// sendResult retries until the backend confirms: the result must never be
+// lost. It gives up only on 400/409/410, and on 401 or a rejected
+// certificate: nothing can be delivered until the agent registers again.
 func (a *Agent) sendResult(ctx context.Context, id string, res protocol.Result, log *slog.Logger) {
 	backoff := a.cfg.InitialBackoff
 	for {
 		err := a.backend.SendResult(ctx, id, res)
 		if err == nil {
+			return
+		}
+		if backend.Unauthorized(err) {
+			log.Error("result not sent: the backend rejects the agent certificate", "status", res.Status, "err", err)
 			return
 		}
 		switch backend.Code(err) {

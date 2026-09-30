@@ -109,6 +109,15 @@ type Result struct {
 	Details    map[string]any `json:"details,omitempty"`
 }
 
+// Progress is the intermediate state of a long action (today only drain),
+// sent with POST /v1/agent/actions/{id}/progress. For drain, Details has
+// "evicted", "remaining" and "blocked" (at most 20 {"pod", "reason"}).
+type Progress struct {
+	UpdatedAt time.Time      `json:"updated_at"`
+	Message   string         `json:"message"`
+	Details   map[string]any `json:"details,omitempty"`
+}
+
 // ClusterStatus is the compact summary sent with PUT /v1/agent/status
 // (components.schemas.ClusterStatus in the contract).
 type ClusterStatus struct {

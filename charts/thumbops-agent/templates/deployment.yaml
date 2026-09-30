@@ -45,6 +45,12 @@ spec:
         - name: agent
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # The agent's own pod: a drain never evicts it.
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
           args:
             - {{ printf "--backend-url=%s" .Values.backend.url | quote }}
             - --policy-file=/etc/thumbops/policy/policy.json

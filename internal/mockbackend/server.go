@@ -32,6 +32,10 @@ const (
 type entry struct {
 	action protocol.Action
 	state  string
+
+	leaseUntil    time.Time // a claimed action expires after this without a result
+	progress      protocol.Progress
+	progressCount int
 }
 
 type Server struct {
@@ -41,18 +45,22 @@ type Server struct {
 	results map[string]protocol.Result
 	notify  chan struct{}
 
+	claims     map[string]int // claim calls per action
 	heartbeats []protocol.HeartbeatRequest
 	statuses   []protocol.ClusterStatus
 	// statusRequested is returned once in the next poll response.
 	statusRequested bool
 	statusCode      int // if not 0, PUT /v1/agent/status responds with this status
 	heartbeatCode   int // if not 0, PUT /v1/agent/heartbeat responds with this status
+	resultCode      int // if not 0, the result endpoint responds with this status
 
 	// Behaviors configurable in tests.
 	Poll           protocol.PollConfig
 	ClaimOverride  map[string]int // action_id → HTTP status to return on claim
 	PollStatus     int            // if not 0, polling responds with this status
+	ProgressStatus int            // if not 0, progress responds with this status
 	ResultFailures int            // how many times to respond 503 when the result is sent
+	ClaimLease     time.Duration  // lease of a claimed action, renewed by progress
 	BootstrapToken string
 	RequireMTLS    bool // requires a valid client certificate on /v1/agent/*
 	CertLifetime   time.Duration
@@ -95,6 +103,7 @@ func New() *Server {
 		usedTokens:     map[string]bool{},
 		BootstrapToken: "bootstrap-test-token",
 		CertLifetime:   30 * 24 * time.Hour,
+		ClaimLease:     5 * time.Minute,
 		clusterID:      "8c1f0e7a-0000-4000-8000-00000000c1a5",
 		caCert:         ca,
 		caKey:          key,
@@ -119,6 +128,14 @@ func (s *Server) TLSConfig() *tls.Config {
 func (s *Server) Enqueue(a protocol.Action) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.enqueueLocked(a)
+	close(s.notify)
+	s.notify = make(chan struct{})
+}
+
+// enqueueLocked adds the action as approved and returns its entry, without
+// waking the pollers. Call it with s.mu held.
+func (s *Server) enqueueLocked(a protocol.Action) *entry {
 	if a.ActionID == "" {
 		a.ActionID = fmt.Sprintf("act-%d", len(s.entries)+1)
 	}
@@ -128,8 +145,84 @@ func (s *Server) Enqueue(a protocol.Action) {
 	e := &entry{action: a, state: stateApproved}
 	s.entries = append(s.entries, e)
 	s.byID[a.ActionID] = e
-	close(s.notify)
-	s.notify = make(chan struct{})
+	return e
+}
+
+// expireLeases marks as expired the claimed actions whose lease is over.
+// Call it with s.mu held.
+func (s *Server) expireLeases() {
+	now := time.Now()
+	for _, e := range s.entries {
+		if e.state == stateClaimed && !e.leaseUntil.IsZero() && now.After(e.leaseUntil) {
+			e.state = stateExpired
+		}
+	}
+}
+
+// EnqueueClaimed adds an action already claimed, as if the agent had claimed
+// it before a restart.
+func (s *Server) EnqueueClaimed(a protocol.Action) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.enqueueLocked(a)
+	e.state = stateClaimed
+	e.leaseUntil = time.Now().Add(s.ClaimLease)
+}
+
+// Cancel cancels an action that is approved or claimed (the next progress
+// gets 410).
+func (s *Server) Cancel(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.byID[id]; ok && (e.state == stateApproved || e.state == stateClaimed) {
+		e.state = stateCancelled
+	}
+}
+
+// Progress returns the last progress of an action and how many were received.
+func (s *Server) Progress(id string) (protocol.Progress, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.byID[id]
+	if !ok {
+		return protocol.Progress{}, 0
+	}
+	return e.progress, e.progressCount
+}
+
+func (s *Server) progressHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var p protocol.Progress
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if code := s.ProgressStatus; code != 0 {
+		http.Error(w, http.StatusText(code), code)
+		return
+	}
+	s.expireLeases()
+	e, ok := s.byID[id]
+	switch {
+	case !ok:
+		http.Error(w, "unknown action", http.StatusNotFound)
+	case e.state == stateClaimed:
+		e.progress = p
+		e.progressCount++
+		e.leaseUntil = time.Now().Add(s.ClaimLease)
+		w.WriteHeader(http.StatusOK)
+	case e.state == stateExpired || e.state == stateCancelled:
+		http.Error(w, "action expired or cancelled", http.StatusGone)
+	default:
+		http.Error(w, "action not claimed", http.StatusConflict)
+	}
+}
+
+func (s *Server) debugCancel(w http.ResponseWriter, r *http.Request) {
+	s.Cancel(r.PathValue("id"))
+	w.WriteHeader(http.StatusOK)
 }
 
 // SetPollStatus changes the polling response even while the server is in use
@@ -137,6 +230,21 @@ func (s *Server) Enqueue(a protocol.Action) {
 func (s *Server) SetPollStatus(code int) {
 	s.mu.Lock()
 	s.PollStatus = code
+	s.mu.Unlock()
+}
+
+// SetProgressStatus makes progress respond with code (0 = normal), even
+// while the server is in use.
+func (s *Server) SetProgressStatus(code int) {
+	s.mu.Lock()
+	s.ProgressStatus = code
+	s.mu.Unlock()
+}
+
+// SetResultStatus makes the result endpoint respond with code (0 = normal).
+func (s *Server) SetResultStatus(code int) {
+	s.mu.Lock()
+	s.resultCode = code
 	s.mu.Unlock()
 }
 
@@ -164,6 +272,13 @@ func (s *Server) WaitResult(id string, timeout time.Duration) (protocol.Result, 
 		time.Sleep(10 * time.Millisecond)
 	}
 	return protocol.Result{}, false
+}
+
+// Claims returns how many claim calls the action received.
+func (s *Server) Claims(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.claims[id]
 }
 
 func (s *Server) State(id string) string {
@@ -235,8 +350,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent/actions", s.poll)
 	mux.HandleFunc("POST /v1/agent/actions/{id}/claim", s.claim)
 	mux.HandleFunc("POST /v1/agent/actions/{id}/result", s.result)
+	mux.HandleFunc("POST /v1/agent/actions/{id}/progress", s.progressHandler)
 	mux.HandleFunc("POST /debug/actions", s.debugEnqueue)
 	mux.HandleFunc("GET /debug/actions", s.debugList)
+	mux.HandleFunc("POST /debug/actions/{id}/cancel", s.debugCancel)
 	mux.HandleFunc("POST /debug/bootstrap-tokens", s.debugAddToken)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.RequireMTLS && strings.HasPrefix(r.URL.Path, "/v1/agent/") {
@@ -419,6 +536,11 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLeases()
+	if s.claims == nil {
+		s.claims = map[string]int{}
+	}
+	s.claims[id]++
 	e, ok := s.byID[id]
 	if !ok {
 		http.Error(w, "unknown action", http.StatusNotFound)
@@ -435,6 +557,7 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "action expired", http.StatusGone)
 	case e.state == stateApproved:
 		e.state = stateClaimed
+		e.leaseUntil = time.Now().Add(s.ClaimLease)
 		w.WriteHeader(http.StatusOK)
 	case e.state == stateExpired || e.state == stateCancelled:
 		http.Error(w, "action expired or canceled", http.StatusGone)
@@ -452,12 +575,21 @@ func (s *Server) result(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.resultCode != 0 {
+		http.Error(w, http.StatusText(s.resultCode), s.resultCode)
+		return
+	}
 	if s.ResultFailures > 0 {
 		s.ResultFailures--
 		http.Error(w, "backend temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	s.expireLeases()
 	e, ok := s.byID[id]
+	if ok && (e.state == stateExpired || e.state == stateCancelled) {
+		http.Error(w, "action expired or cancelled", http.StatusGone)
+		return
+	}
 	if !ok || e.state != stateClaimed {
 		http.Error(w, "action not claimed", http.StatusConflict)
 		return
@@ -495,16 +627,24 @@ func (s *Server) debugAddToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) debugList(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLeases()
 	type row struct {
-		Action protocol.Action  `json:"action"`
-		State  string           `json:"state"`
-		Result *protocol.Result `json:"result,omitempty"`
+		Action        protocol.Action    `json:"action"`
+		State         string             `json:"state"`
+		Result        *protocol.Result   `json:"result,omitempty"`
+		Progress      *protocol.Progress `json:"progress,omitempty"`
+		ProgressCount int                `json:"progress_count,omitempty"`
 	}
 	out := []row{}
 	for _, e := range s.entries {
 		rw := row{Action: e.action, State: e.state}
 		if res, ok := s.results[e.action.ActionID]; ok {
 			rw.Result = &res
+		}
+		if e.progressCount > 0 {
+			p := e.progress
+			rw.Progress = &p
+			rw.ProgressCount = e.progressCount
 		}
 		out = append(out, rw)
 	}

@@ -410,3 +410,19 @@ func clone[T any](v T) T {
 	_ = json.Unmarshal(b, &out)
 	return out
 }
+
+// PatchNodeForTest applies a JSON merge patch to a node, as a test setup
+// step (no permission check, not recorded in Patches).
+func (s *Server) PatchNodeForTest(name string, patch map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.nodes[name]
+	cur := map[string]any{}
+	b, _ := json.Marshal(n)
+	_ = json.Unmarshal(b, &cur)
+	merged := mergePatch(cur, patch)
+	b, _ = json.Marshal(merged)
+	var out kube.Node
+	_ = json.Unmarshal(b, &out)
+	s.nodes[name] = &out
+}

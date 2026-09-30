@@ -3,8 +3,9 @@
 # RBAC) registers with the mock backend over mTLS, runs approved actions,
 # rejects the ones outside the policy, renews its certificate, exposes health
 # probes and metrics, keeps its identity (in a Secret) across restarts,
-# survives helm upgrade, uninstall and reinstall with its identity, and
-# registers again with a new bootstrap token.
+# survives helm upgrade, uninstall and reinstall with its identity, registers
+# again with a new bootstrap token, and reports drain progress and resumes a
+# drain after an agent restart.
 #
 #   export KUBECONFIG="$PWD/.kind-kubeconfig"
 #   kind create cluster --name thumbops-e2e --config test/e2e/kind.yaml
@@ -259,6 +260,37 @@ wait_for "agent start" 60 agent_logged '"agent started"'
 agent_logged '"agent registered"'
 [[ $(identity_field 'key\.pem') != "$key_before" ]]
 run_action succeeded '{"type":"scale","params":{"namespace":"default","deployment":"web","replicas":3}}'
+
+log "drain progress and resume after an agent restart"
+kubectl create deployment slow --image=registry.k8s.io/pause:3.10 --replicas=1 --dry-run=client -o yaml |
+  kubectl apply -f -
+kubectl patch deployment slow --type merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"thumbops-e2e":"workload"}}}}}'
+kubectl uncordon "$workload_node"
+kubectl rollout status deploy/slow --timeout=120s
+kubectl create poddisruptionbudget slow --selector=app=slow --min-available=1
+drain_id=$(backend POST /debug/actions "{\"type\":\"drain\",\"params\":{\"node\":\"$workload_node\",\"timeout_seconds\":240}}" | jq -r .action_id)
+
+action_row() { backend GET /debug/actions | jq --arg id "$drain_id" '.[] | select(.action.action_id == $id)'; }
+blocked_reported() { action_row | jq -e '.progress.details.blocked | length > 0' >/dev/null; }
+wait_for "progress with the PDB-blocked pod" 60 blocked_reported
+node_state() { kubectl get node "$workload_node" -o jsonpath='{.metadata.annotations.thumbops\.mobiletechnologies\.cloud/drain-in-progress}'; }
+[[ $(node_state | jq -r .action_id) == "$drain_id" ]]
+
+old=$(kubectl -n thumbops get pods -l app.kubernetes.io/name=thumbops-agent -o name)
+kubectl -n thumbops delete $old --wait=false
+kubectl -n thumbops wait --for=delete $old --timeout=120s
+# Only the new pod can raise the count from here on.
+count_before=$(action_row | jq .progress_count)
+wait_for "agent start" 60 agent_logged '"agent started"'
+wait_for "drain resume" 60 agent_logged '"resuming an interrupted drain"'
+more_progress() { (( $(action_row | jq .progress_count) > count_before )); }
+wait_for "progress after the resume" 60 more_progress
+
+kubectl delete poddisruptionbudget slow
+wait_for "result of the resumed drain" 120 has_result "$drain_id"
+[[ $(action_row | jq -r .result.status) == succeeded ]]
+[[ -z $(node_state) ]]
+kubectl delete deployment slow
 
 [[ $(agent_restarts) == 0 ]]
 
