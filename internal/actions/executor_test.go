@@ -304,10 +304,25 @@ func TestDrainProgressAndAnnotation(t *testing.T) {
 	fk.BlockEviction("payments", "api-2", 3) // PDB: three rejections
 
 	var log progressLog
+	var atFirst kube.Node
+	firstSeen := false
+	var patchesAtFirst []string
 	r := e.Execute(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain,
-		Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 5}}, log.add)
+		Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 5}}, func(p protocol.Progress) {
+		if !firstSeen {
+			firstSeen = true
+			atFirst = fk.Node("worker-1")
+			patchesAtFirst = fk.Patches()
+		}
+		log.add(p)
+	})
 	expectStatus(t, r, protocol.StatusSucceeded)
 
+	// The cordon and the annotation arrive in one patch: at the first progress
+	// report there is exactly one node patch and it did both.
+	if len(patchesAtFirst) != 1 || !atFirst.Spec.Unschedulable || inProgress(t, atFirst)["action_id"] != "d1" {
+		t.Fatalf("cordon and annotation must come in one patch: %v %+v", patchesAtFirst, atFirst.Metadata.Annotations)
+	}
 	if len(log.got) < 2 {
 		t.Fatalf("expected several progress reports, got %d", len(log.got))
 	}
@@ -323,6 +338,14 @@ func TestDrainProgressAndAnnotation(t *testing.T) {
 	}
 	if !sawBlocked {
 		t.Fatalf("no progress reported the PDB-blocked pod: %+v", log.got)
+	}
+	prev := -1
+	for _, p := range log.got {
+		ev, _ := p.Details["evicted"].(int)
+		if ev < prev {
+			t.Fatalf("evicted must never decrease: %d after %d (%+v)", ev, prev, log.got)
+		}
+		prev = ev
 	}
 	if st := inProgress(t, fk.Node("worker-1")); st != nil {
 		t.Fatalf("the in-progress annotation must be removed at the end: %v", st)
@@ -367,6 +390,9 @@ func TestDrainStoppedByTheBackend(t *testing.T) {
 	}
 	if n.Metadata.Annotations[AnnotationLastActionID] == "d1" {
 		t.Fatal("a stopped drain must not write a result annotation")
+	}
+	if len(fk.Evictions()) != 0 {
+		t.Fatalf("no eviction after the stop: %v", fk.Evictions())
 	}
 }
 
@@ -460,5 +486,54 @@ func TestDrainSkipsTheAgentPod(t *testing.T) {
 	}
 	if r.Details["agent_pod_left"] != "thumbops/thumbops-agent-abc" || !strings.Contains(r.Message, "agent") {
 		t.Fatalf("result must report the agent pod: %s %+v", r.Message, r.Details)
+	}
+}
+
+func TestDrainResumeReassertsTheCordon(t *testing.T) {
+	fk, e := setup(t)
+	fk.AddNode("worker-1", true, nil)
+	fk.AddPod(pod("payments", "api-1", "worker-1", ctrl("ReplicaSet", "api-rs")))
+	state, _ := json.Marshal(map[string]any{"action_id": "d1", "started_at": time.Now().UTC(), "timeout_seconds": 60})
+	fk.PatchNodeForTest("worker-1", map[string]any{"spec": map[string]any{"unschedulable": false},
+		"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: string(state)}}})
+	r := e.Execute(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain,
+		Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 60}}, nil)
+	expectStatus(t, r, protocol.StatusSucceeded)
+	if !fk.Node("worker-1").Spec.Unschedulable {
+		t.Fatal("a resumed drain must cordon the node again")
+	}
+}
+
+func TestDrainResumeWithABlocker(t *testing.T) {
+	fk, e := setup(t)
+	fk.AddNode("worker-1", true, nil)
+	fk.AddPod(pod("payments", "bare", "worker-1", nil))
+	state, _ := json.Marshal(map[string]any{"action_id": "d1", "started_at": time.Now().UTC(), "timeout_seconds": 60})
+	fk.PatchNodeForTest("worker-1", map[string]any{"spec": map[string]any{"unschedulable": true},
+		"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: string(state)}}})
+	r := e.Execute(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain,
+		Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 60}}, nil)
+	expectStatus(t, r, protocol.StatusFailed)
+	if !strings.Contains(r.Message, "aborted on resume") {
+		t.Fatalf("message: %s", r.Message)
+	}
+	n := fk.Node("worker-1")
+	if !n.Spec.Unschedulable || inProgress(t, n) != nil {
+		t.Fatalf("expected a cordoned node with no annotation: %+v", n.Metadata.Annotations)
+	}
+}
+
+func TestUncordonEndsADrainInProgress(t *testing.T) {
+	fk, e := setup(t)
+	fk.AddNode("worker-1", true, nil)
+	state, _ := json.Marshal(map[string]any{"action_id": "d1", "started_at": time.Now().UTC(), "timeout_seconds": 60})
+	fk.PatchNodeForTest("worker-1", map[string]any{"spec": map[string]any{"unschedulable": true},
+		"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: string(state)}}})
+	r := e.Execute(context.Background(), protocol.Action{ActionID: "u1", Type: protocol.ActionUncordon,
+		Params: protocol.Params{Node: "worker-1"}}, nil)
+	expectStatus(t, r, protocol.StatusSucceeded)
+	n := fk.Node("worker-1")
+	if n.Spec.Unschedulable || inProgress(t, n) != nil {
+		t.Fatalf("uncordon must clear the drain in progress: %+v", n)
 	}
 }

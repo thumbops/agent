@@ -30,6 +30,7 @@ const (
 	defaultDrainTimeout = 10 * time.Minute
 )
 
+// AnnotationDrainInProgress marks a node whose drain started and has not
 // finished: after a restart the agent finds it and resumes the drain.
 const AnnotationDrainInProgress = "thumbops.mobiletechnologies.cloud/drain-in-progress"
 
@@ -238,8 +239,13 @@ func (e *Executor) setSchedulable(ctx context.Context, a protocol.Action, start 
 		msg = "node %s uncordoned: pods can be scheduled on it again"
 	}
 	res := e.succeeded(start, map[string]any{"previously_unschedulable": n.Spec.Unschedulable}, msg, node)
+	ann := resultAnnotations(a.ActionID, res)
+	if !cordon {
+		// An explicit uncordon ends a drain in progress: it must not be resumed.
+		ann[AnnotationDrainInProgress] = nil
+	}
 	patch := map[string]any{
-		"metadata": map[string]any{"annotations": resultAnnotations(a.ActionID, res)},
+		"metadata": map[string]any{"annotations": ann},
 		"spec":     map[string]any{"unschedulable": cordon},
 	}
 	if _, err := e.Kube.PatchNode(ctx, node, patch); err != nil {
@@ -274,8 +280,11 @@ func (e *Executor) InProgressDrains(ctx context.Context) (actions []protocol.Act
 		}
 		st, ok := readDrainState(n.Metadata.Annotations)
 		if !ok {
-			dropped = append(dropped, name)
-			_, _ = e.Kube.PatchNode(ctx, name, map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: nil}}})
+			if _, perr := e.Kube.PatchNode(ctx, name, map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: nil}}}); perr != nil {
+				dropped = append(dropped, fmt.Sprintf("%s (annotation not removed: %v)", name, perr))
+			} else {
+				dropped = append(dropped, name)
+			}
 			continue
 		}
 		actions = append(actions, protocol.Action{ActionID: st.ActionID, Type: protocol.ActionDrain, Params: protocol.Params{
@@ -348,12 +357,18 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 		return r
 	}
 	if len(blockers) > 0 {
-		r := e.failed(start, "drain of %s stopped: %s; the node stays cordoned", node, strings.Join(blockers, "; "))
+		r := e.failed(start, "drain of %s aborted on resume: %s; the node stays cordoned", node, strings.Join(blockers, "; "))
 		r.Details = map[string]any{"blocking_pods": blockers}
 		return e.finishDrain(ctx, a, node, r)
 	}
 
-	if !resumed {
+	if resumed {
+		// Re-assert the cordon: the node may have been uncordoned by hand
+		// while the agent was down.
+		if _, err := e.Kube.PatchNode(ctx, node, map[string]any{"spec": map[string]any{"unschedulable": true}}); err != nil {
+			return e.failed(start, "%s", describe(err, what))
+		}
+	} else {
 		state, _ := json.Marshal(drainState{ActionID: a.ActionID, StartedAt: start, TimeoutSeconds: int(total / time.Second),
 			DeleteEmptyDirData: a.Params.DeleteEmptyDirData})
 		patch := map[string]any{
@@ -364,7 +379,7 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 			return e.failed(start, "%s", describe(err, what))
 		}
 	}
-	report := func(evicted, remaining int, blocked []kube.Pod) {
+	report := func(evicted, remaining int, blocked []kube.Pod, waiting bool) {
 		if progress == nil {
 			return
 		}
@@ -373,13 +388,16 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 			list = append(list, map[string]string{"pod": podKey(p), "reason": "PodDisruptionBudget"})
 		}
 		msg := fmt.Sprintf("draining %s: %d pods evicted, %d remaining", node, evicted, remaining)
+		if waiting {
+			msg = fmt.Sprintf("draining %s: %d pods evicted, %d still terminating", node, evicted, remaining)
+		}
 		if len(blocked) > 0 {
 			msg += fmt.Sprintf(", %d blocked by a PodDisruptionBudget", len(blocked))
 		}
 		progress(protocol.Progress{UpdatedAt: e.Now().UTC(), Message: msg,
 			Details: map[string]any{"evicted": evicted, "remaining": remaining, "blocked": list}})
 	}
-	report(0, len(toEvict), nil)
+	report(0, len(toEvict), nil, false)
 	if left <= 0 {
 		return e.finishDrain(ctx, a, node, e.drainTimeout(start, node, total, toEvict))
 	}
@@ -405,7 +423,7 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 			}
 		}
 		pending = blocked
-		report(len(toEvict)-len(pending), len(pending), pending)
+		report(len(toEvict)-len(pending), len(pending), pending, false)
 		if len(pending) > 0 && !sleep(dctx, e.PollInterval) {
 			return e.finishDrain(ctx, a, node, e.drainTimeout(start, node, total, pending))
 		}
@@ -430,7 +448,7 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 			}
 		}
 		remaining = still
-		report(len(toEvict)-len(remaining), len(remaining), nil)
+		report(len(toEvict), len(remaining), nil, true)
 		if len(remaining) > 0 && !sleep(dctx, e.PollInterval) {
 			return e.finishDrain(ctx, a, node, e.drainTimeout(start, node, total, remaining))
 		}
