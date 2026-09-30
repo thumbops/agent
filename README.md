@@ -42,7 +42,11 @@ There are five actions: `rollout-restart`, `scale`, `cordon`, `uncordon`,
   timeout. While it runs it sends progress (evicted, remaining and blocked
   pods), which also keeps the action alive in the backend. The cordon patch
   marks the node with `thumbops.mobiletechnologies.cloud/drain-in-progress`:
-  an agent that restarts mid-drain resumes it with the time left.
+  an agent that restarts mid-drain resumes it with the time left,
+  re-asserting the cordon. An explicit `uncordon` action ends a drain in
+  progress (it removes the annotation, so the drain is not resumed). If the
+  backend answers `409`/`410` to a progress, the drain stops with no further
+  evictions, leaves the node cordoned and sends no result.
 - **Local policy in JSON** (ConfigMap). Without a file the policy denies
   everything. Besides action types, namespaces and a replica maximum, it
   protects control plane nodes by default.

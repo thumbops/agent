@@ -87,7 +87,9 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
   node stays cordoned and the result lists the remaining pods; never evict the
   agent's own pod; the `drain-in-progress` annotation is written with the cordon
   and removed with the result (kept on shutdown, so the drain is resumed;
-  removed on `409`/`410` to progress, which stop the drain without a result).
+  removed on `409`/`410` to progress, which stop the drain without a result); a resume re-asserts the
+  cordon; an explicit uncordon removes the drain-in-progress annotation (the
+  drain is not resumed).
 - **Results are never lost.** Sending the result is retried with backoff
   until the backend confirms (except `400`/`409`/`410`).
 - **Certificate change = new connections.** After registration and renewal

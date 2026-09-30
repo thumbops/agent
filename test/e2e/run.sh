@@ -263,10 +263,11 @@ wait_for "progress with the PDB-blocked pod" 60 blocked_reported
 node_state() { kubectl get node "$workload_node" -o jsonpath='{.metadata.annotations.thumbops\.mobiletechnologies\.cloud/drain-in-progress}'; }
 [[ $(node_state | jq -r .action_id) == "$drain_id" ]]
 
-count_before=$(action_row | jq .progress_count)
 old=$(kubectl -n thumbops get pods -l app.kubernetes.io/name=thumbops-agent -o name)
 kubectl -n thumbops delete $old --wait=false
 kubectl -n thumbops wait --for=delete $old --timeout=120s
+# Only the new pod can raise the count from here on.
+count_before=$(action_row | jq .progress_count)
 wait_for "agent start" 60 agent_logged '"agent started"'
 wait_for "drain resume" 60 agent_logged '"resuming an interrupted drain"'
 more_progress() { (( $(action_row | jq .progress_count) > count_before )); }
