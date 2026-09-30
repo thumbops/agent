@@ -125,6 +125,14 @@ func (s *Server) TLSConfig() *tls.Config {
 func (s *Server) Enqueue(a protocol.Action) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.enqueueLocked(a)
+	close(s.notify)
+	s.notify = make(chan struct{})
+}
+
+// enqueueLocked adds the action as approved and returns its entry, without
+// waking the pollers. Call it with s.mu held.
+func (s *Server) enqueueLocked(a protocol.Action) *entry {
 	if a.ActionID == "" {
 		a.ActionID = fmt.Sprintf("act-%d", len(s.entries)+1)
 	}
@@ -134,8 +142,7 @@ func (s *Server) Enqueue(a protocol.Action) {
 	e := &entry{action: a, state: stateApproved}
 	s.entries = append(s.entries, e)
 	s.byID[a.ActionID] = e
-	close(s.notify)
-	s.notify = make(chan struct{})
+	return e
 }
 
 // expireLeases marks as expired the claimed actions whose lease is over.
@@ -152,10 +159,9 @@ func (s *Server) expireLeases() {
 // EnqueueClaimed adds an action already claimed, as if the agent had claimed
 // it before a restart.
 func (s *Server) EnqueueClaimed(a protocol.Action) {
-	s.Enqueue(a)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e := s.byID[a.ActionID]
+	e := s.enqueueLocked(a)
 	e.state = stateClaimed
 	e.leaseUntil = time.Now().Add(s.ClaimLease)
 }
