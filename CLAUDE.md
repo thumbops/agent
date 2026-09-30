@@ -46,7 +46,7 @@ the mock backend in HTTPS mode). Never on a production cluster.
 | `internal/backend` | Backend HTTP client |
 | `internal/identity` | Ed25519 key, CSR, certificate; `SecretStore` (in the cluster) and `FileStore` (`--state-dir`, development) |
 | `internal/enroll` | `Enroller`: registration, new registration with a new token, renewal |
-| `internal/agent` | Main loop: heartbeat, poll, claim, execution, result, status sending |
+| `internal/agent` | Main loop: heartbeat, poll, claim, execution, result, status sending, drain progress and resume |
 | `internal/status` | Cluster status for the dashboard: client-go informers and the summary |
 | `internal/metrics` | Prometheus metrics on a private registry; nil-safe |
 | `internal/health` | Liveness and readiness state, HTTP handler for /healthz, /readyz, /metrics |
@@ -84,7 +84,10 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
 - **Safe drain.** Stop *before* cordoning if there are pods without a
   controller or with `emptyDir` (without consent); use the Eviction API
   (honors PDBs); skip DaemonSet, static and terminated pods; on timeout the
-  node stays cordoned and the result lists the remaining pods.
+  node stays cordoned and the result lists the remaining pods; never evict the
+  agent's own pod; the `drain-in-progress` annotation is written with the cordon
+  and removed with the result (kept on shutdown, so the drain is resumed;
+  removed on `409`/`410` to progress, which stop the drain without a result).
 - **Results are never lost.** Sending the result is retried with backoff
   until the backend confirms (except `400`/`409`/`410`).
 - **Certificate change = new connections.** After registration and renewal

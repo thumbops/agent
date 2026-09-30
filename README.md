@@ -34,10 +34,15 @@ There are five actions: `rollout-restart`, `scale`, `cordon`, `uncordon`,
 - **Scale in a single deployment patch**, so replicas and annotations change
   together.
 - **Drain like `kubectl drain`**: it skips DaemonSet, static and terminated
-  pods; it stops *before* cordoning if it finds pods without a controller or
-  with `emptyDir` volumes (the latter only with explicit consent); it uses the
-  Eviction API, so it honors PodDisruptionBudgets, and retries blocked pods in
-  rounds until the timeout.
+  pods, and the agent's own pod (reported in the result: it moves at the
+  agent's next restart); it stops *before* cordoning if it finds pods
+  without a controller or with `emptyDir` volumes (the latter only with
+  explicit consent); it uses the Eviction API, so it honors
+  PodDisruptionBudgets, and retries blocked pods in rounds until the
+  timeout. While it runs it sends progress (evicted, remaining and blocked
+  pods), which also keeps the action alive in the backend. The cordon patch
+  marks the node with `thumbops.mobiletechnologies.cloud/drain-in-progress`:
+  an agent that restarts mid-drain resumes it with the time left.
 - **Local policy in JSON** (ConfigMap). Without a file the policy denies
   everything. Besides action types, namespaces and a replica maximum, it
   protects control plane nodes by default.
@@ -258,10 +263,6 @@ go run ./cmd/thumbops-agent --backend-url https://127.0.0.1:8443 --backend-ca-fi
   --kube-api http://127.0.0.1:8001 --policy-file /tmp/policy.json
 curl --cacert /tmp/server.crt https://127.0.0.1:8443/debug/actions
 ```
-
-## Missing for production
-
-- Intermediate results for long drains (an open question in the protocol).
 
 ## License
 
