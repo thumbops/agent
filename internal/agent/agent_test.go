@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"github.com/thumbops/agent/internal/enroll"
 	"github.com/thumbops/agent/internal/health"
 	"github.com/thumbops/agent/internal/identity"
+	"github.com/thumbops/agent/internal/kube"
 	"github.com/thumbops/agent/internal/kubefake"
 	"github.com/thumbops/agent/internal/metrics"
 	"github.com/thumbops/agent/internal/mockbackend"
@@ -532,5 +534,91 @@ func TestHeartbeatAttemptKeepsLivenessWhenBackendIsDown(t *testing.T) {
 	}
 	if err := hs.Live(); err != nil {
 		t.Fatalf("a failed heartbeat attempt must keep the agent live: %v", err)
+	}
+}
+
+func podOn(ns, name, node string) kube.Pod {
+	yes := true
+	return kube.Pod{
+		Metadata: kube.ObjectMeta{Name: name, Namespace: ns, UID: name,
+			OwnerReferences: []kube.OwnerReference{{Kind: "ReplicaSet", Name: "rs", Controller: &yes}}},
+		Spec:   kube.PodSpec{NodeName: node},
+		Status: kube.PodStatus{Phase: "Running"},
+	}
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestDrainProgressReachesTheBackend(t *testing.T) {
+	e := newEnv(t, nil, func(c *Config) { c.ProgressMinGap = time.Millisecond })
+	e.fk.AddPod(podOn("payments", "api-1", "worker-1"))
+	e.fk.AddPod(podOn("payments", "api-2", "worker-1"))
+	e.fk.BlockEviction("payments", "api-2", 3)
+	e.mb.Enqueue(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 5}})
+	e.agent.handle(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain,
+		Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 5}, ExpiresAt: time.Now().Add(time.Minute)})
+	res, ok := e.mb.Result("d1")
+	if !ok || res.Status != protocol.StatusSucceeded {
+		t.Fatalf("result: %+v %v", res, ok)
+	}
+	if _, n := e.mb.Progress("d1"); n < 2 {
+		t.Fatalf("expected progress reports, got %d", n)
+	}
+}
+
+func TestDrainStoppedWhenTheBackendCancels(t *testing.T) {
+	e := newEnv(t, nil, func(c *Config) {
+		c.ProgressMinGap = time.Millisecond
+		c.ProgressMaxGap = 100 * time.Millisecond
+	})
+	e.fk.AddPod(podOn("payments", "db-0", "worker-1"))
+	e.fk.BlockEviction("payments", "db-0", -1)
+	e.mb.Enqueue(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 30}})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.agent.handle(context.Background(), protocol.Action{ActionID: "d1", Type: protocol.ActionDrain,
+			Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 30}, ExpiresAt: time.Now().Add(time.Minute)})
+	}()
+	waitUntil(t, func() bool { _, n := e.mb.Progress("d1"); return n >= 1 })
+	e.mb.Cancel("d1")
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain did not stop after the backend cancelled it")
+	}
+	if _, ok := e.mb.Result("d1"); ok {
+		t.Fatal("no result must be sent for a cancelled action")
+	}
+	if _, ok := e.fk.Node("worker-1").Metadata.Annotations[actions.AnnotationDrainInProgress]; ok {
+		t.Fatal("the in-progress annotation must be removed")
+	}
+}
+
+func TestInterruptedDrainIsResumedAtStartup(t *testing.T) {
+	e := newEnv(t, nil)
+	e.fk.AddPod(podOn("payments", "api-1", "worker-1"))
+	state, _ := json.Marshal(map[string]any{"action_id": "d1", "started_at": time.Now().Add(-time.Second).UTC(), "timeout_seconds": 30})
+	e.fk.PatchNodeForTest("worker-1", map[string]any{"spec": map[string]any{"unschedulable": true},
+		"metadata": map[string]any{"annotations": map[string]any{actions.AnnotationDrainInProgress: string(state)}}})
+	e.mb.EnqueueClaimed(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 30}})
+
+	stop := e.run(t)
+	defer stop()
+	res, ok := e.mb.WaitResult("d1", 5*time.Second)
+	if !ok || res.Status != protocol.StatusSucceeded {
+		t.Fatalf("the resumed drain must report its result: %+v %v", res, ok)
+	}
+	if e.fk.PodExists("payments", "api-1") {
+		t.Fatal("the resumed drain must evict the pod")
 	}
 }

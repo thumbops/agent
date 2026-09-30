@@ -197,7 +197,9 @@ func main() {
 		log.Info("identity loaded", "cluster_id", en.ClusterID(), "certificate_expires", holder.Get().Leaf.NotAfter)
 	}
 
-	a := agent.New(cfg, b, k, actions.New(k), pol)
+	exec := actions.New(k)
+	exec.SelfNamespace, exec.SelfName = selfPod()
+	a := agent.New(cfg, b, k, exec, pol)
 	log.Info("agent started", "version", version, "backend", *backendURL)
 	if err := a.Run(ctx); err != nil {
 		fatal("%v", err)
@@ -234,4 +236,18 @@ func registerInfo(ctx context.Context, k *kube.Client) (protocol.RegisterRequest
 func fatal(format string, args ...any) {
 	slog.Error(fmt.Sprintf(format, args...))
 	os.Exit(1)
+}
+
+// selfPod returns the agent's own pod, which a drain never evicts: from the
+// downward API (POD_NAMESPACE, POD_NAME), else the ServiceAccount namespace
+// and the hostname (the pod name by default).
+func selfPod() (namespace, name string) {
+	namespace, name = os.Getenv("POD_NAMESPACE"), os.Getenv("POD_NAME")
+	if namespace == "" {
+		namespace, _ = kube.InClusterNamespace()
+	}
+	if name == "" {
+		name, _ = os.Hostname()
+	}
+	return namespace, name
 }

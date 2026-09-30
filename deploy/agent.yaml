@@ -324,6 +324,12 @@ spec:
         - name: agent
           image: "ghcr.io/thumbops/agent:0.1.0"
           imagePullPolicy: IfNotPresent
+          env:
+            # The agent's own pod: a drain never evicts it.
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
           args:
             - "--backend-url=https://agent.thumbops.mobiletechnologies.cloud"
             - --policy-file=/etc/thumbops/policy/policy.json

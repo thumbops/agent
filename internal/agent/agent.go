@@ -39,6 +39,9 @@ type Config struct {
 	// Metrics and Health are optional (nil records nothing).
 	Metrics *metrics.Metrics
 	Health  *health.State
+	// Progress throttling (defaults 5s and 30s).
+	ProgressMinGap time.Duration
+	ProgressMaxGap time.Duration
 }
 
 // StatusSource builds the cluster status summary; ok is false while it is
@@ -95,6 +98,12 @@ func New(cfg Config, b *backend.Client, k *kube.Client, exec *actions.Executor, 
 	if cfg.StatusRetry == 0 {
 		cfg.StatusRetry = 5 * time.Second
 	}
+	if cfg.ProgressMinGap == 0 {
+		cfg.ProgressMinGap = 5 * time.Second
+	}
+	if cfg.ProgressMaxGap == 0 {
+		cfg.ProgressMaxGap = 30 * time.Second
+	}
 	return &Agent{
 		cfg: cfg, backend: b, kube: k, exec: exec, policy: pol, log: cfg.Logger,
 		poll:      protocol.PollConfig{WaitSeconds: 20},
@@ -146,6 +155,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 		}
 	}()
+
+	a.resumeDrains(ctx)
 
 	backoff := a.cfg.InitialBackoff
 	for {
@@ -270,20 +281,65 @@ func (a *Agent) handle(ctx context.Context, act protocol.Action) {
 		log.Warn("action rejected by the local policy", "reason", err)
 		a.cfg.Metrics.ActionOutcome(act.Type, protocol.StatusRejected)
 	} else {
-		log.Info("running action", "params", act.Params, "requested_by", act.RequestedBy)
-		a.cfg.Metrics.ActionRunning(true)
-		start := time.Now()
-		res = a.exec.Execute(ctx, act, nil)
-		a.cfg.Metrics.ObserveActionDuration(act.Type, time.Since(start))
-		a.cfg.Metrics.ActionRunning(false)
-		a.cfg.Metrics.ActionOutcome(act.Type, res.Status)
-		log.Info("action finished", "status", res.Status, "message", res.Message)
+		var gone bool
+		if res, gone = a.execute(ctx, act, log); gone {
+			return
+		}
 	}
 
 	a.sendResult(ctx, act.ActionID, res, log)
 	a.mu.Lock()
 	a.lastActionID = act.ActionID
 	a.mu.Unlock()
+}
+
+// execute runs a claimed action with a progress reporter. gone is true when
+// the backend stopped tracking the action (409/410 on progress): no result
+// must be sent.
+func (a *Agent) execute(ctx context.Context, act protocol.Action, log *slog.Logger) (res protocol.Result, gone bool) {
+	actx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	rep := newProgressReporter(actx, a.backend, act.ActionID, cancel, a.serverNow, log, a.cfg.ProgressMinGap, a.cfg.ProgressMaxGap)
+	log.Info("running action", "params", act.Params, "requested_by", act.RequestedBy)
+	a.cfg.Metrics.ActionRunning(true)
+	start := time.Now()
+	res = a.exec.Execute(actx, act, rep.report)
+	a.cfg.Metrics.ObserveActionDuration(act.Type, time.Since(start))
+	a.cfg.Metrics.ActionRunning(false)
+	if errors.Is(context.Cause(actx), actions.ErrActionGone) {
+		a.cfg.Metrics.ActionOutcome(act.Type, metrics.OutcomeDiscarded)
+		log.Warn("action stopped: the backend no longer tracks it, no result sent")
+		return res, true
+	}
+	a.cfg.Metrics.ActionOutcome(act.Type, res.Status)
+	log.Info("action finished", "status", res.Status, "message", res.Message)
+	return res, false
+}
+
+// resumeDrains finishes the drains interrupted by a restart (nodes with the
+// drain-in-progress annotation): no new claim, no policy check (both
+// happened before the restart).
+func (a *Agent) resumeDrains(ctx context.Context) {
+	acts, dropped, err := a.exec.InProgressDrains(ctx)
+	if err != nil {
+		a.log.Warn("cannot look for interrupted drains", "err", err)
+		return
+	}
+	for _, node := range dropped {
+		a.log.Warn("unreadable drain-in-progress annotation removed; the node stays cordoned", "node", node)
+	}
+	for _, act := range acts {
+		log := a.log.With("action_id", act.ActionID, "type", act.Type)
+		log.Info("resuming an interrupted drain", "node", act.Params.Node)
+		res, gone := a.execute(ctx, act, log)
+		if gone {
+			continue
+		}
+		a.sendResult(ctx, act.ActionID, res, log)
+		a.mu.Lock()
+		a.lastActionID = act.ActionID
+		a.mu.Unlock()
+	}
 }
 
 func (a *Agent) checkPolicy(ctx context.Context, act protocol.Action) error {
