@@ -43,7 +43,9 @@ There are five actions: `rollout-restart`, `scale`, `cordon`, `uncordon`,
   pods), which also keeps the action alive in the backend. The cordon patch
   marks the node with `thumbops.mobiletechnologies.cloud/drain-in-progress`:
   an agent that restarts mid-drain resumes it with the time left,
-  re-asserting the cordon. An explicit `uncordon` action ends a drain in
+  re-asserting the cordon, but only if the current local policy still
+  allows it and the backend accepts its first progress (otherwise it
+  removes the annotation and leaves the node as it is). An explicit `uncordon` action ends a drain in
   progress (it removes the annotation, so the drain is not resumed). If the
   backend answers `409`/`410` to a progress, the drain stops with no further
   evictions, leaves the node cordoned and sends no result.
@@ -93,7 +95,7 @@ authentication:
 | `backend_requests_total` | `operation`, `code` | Backend calls; `code` is the HTTP status or `error` |
 | `heartbeat_last_success_timestamp_seconds` | | Alert here for "backend unreachable" |
 | `heartbeat_only` | | 1 after a `426`: upgrade the agent |
-| `actions_total` | `type`, `outcome` | `succeeded`, `failed`, `rejected`, `expired`, `discarded` |
+| `actions_total` | `type`, `outcome` | `succeeded`, `failed`, `rejected`, `expired`, `discarded` (`discarded` also counts actions the backend stopped with `409`/`410` on progress) |
 | `action_duration_seconds` | `type` | Execution time (histogram) |
 | `action_in_progress` | | 1 while an action runs |
 | `certificate_expiry_timestamp_seconds` | | Expiry of the certificate in use |

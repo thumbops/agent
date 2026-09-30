@@ -91,13 +91,20 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
   controller or with `emptyDir` (without consent); use the Eviction API
   (honors PDBs); skip DaemonSet, static and terminated pods; on timeout the
   node stays cordoned and the result lists the remaining pods; never evict the
-  agent's own pod; the `drain-in-progress` annotation is written with the cordon
-  and removed with the result (kept on shutdown, so the drain is resumed;
-  removed on `409`/`410` to progress, which stop the drain without a result); a resume re-asserts the
-  cordon; an explicit uncordon removes the drain-in-progress annotation (the
-  drain is not resumed).
+  agent's own pod.
+- **Drain resume.** The `drain-in-progress` annotation is written with the
+  cordon and removed with the result; it is kept on shutdown and on `401`, so
+  the drain is resumed; it is removed on `409`/`410` to progress (which stop
+  the drain without a result), on a resume the policy rejects and on an
+  explicit `uncordon`. A resume makes no claim; it changes nothing until its
+  first progress gets a `200` (`404`, `409`, `410` or repeated failures
+  abandon it and leave the node as it is); it is checked against the current
+  local policy (rejected: `rejected` result, annotation removed); then it
+  re-asserts the cordon and uses the time left from `started_at`.
 - **Results are never lost.** Sending the result is retried with backoff
-  until the backend confirms (except `400`/`409`/`410`).
+  until the backend confirms (except `400`/`409`/`410`); a 401 or a rejected
+  certificate is the other exception: the agent stops and a new registration
+  is needed.
 - **Certificate change = new connections.** After registration and renewal
   `backend.Client.ResetConnections()` must be called (`Enroller.activate`
   does it): the client certificate is presented only at the handshake, and long
