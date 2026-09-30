@@ -10,6 +10,7 @@ package actions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -29,10 +30,48 @@ const (
 	defaultDrainTimeout = 10 * time.Minute
 )
 
+// finished: after a restart the agent finds it and resumes the drain.
+const AnnotationDrainInProgress = "thumbops.mobiletechnologies.cloud/drain-in-progress"
+
+// ErrActionGone is the cancellation cause used when the backend no longer
+// tracks the action (409/410 on progress): the drain stops, removes its
+// in-progress annotation and no result is sent. Any other cancellation (the
+// agent shutting down) keeps the annotation, so the drain is resumed.
+var ErrActionGone = errors.New("the backend no longer tracks the action")
+
+// ProgressFunc receives the progress of a long action. It may be nil.
+type ProgressFunc func(protocol.Progress)
+
+// drainState is the value of AnnotationDrainInProgress.
+type drainState struct {
+	ActionID           string    `json:"action_id"`
+	StartedAt          time.Time `json:"started_at"`
+	TimeoutSeconds     int       `json:"timeout_seconds"`
+	DeleteEmptyDirData bool      `json:"delete_emptydir_data"`
+}
+
+func readDrainState(ann map[string]string) (drainState, bool) {
+	raw, ok := ann[AnnotationDrainInProgress]
+	if !ok {
+		return drainState{}, false
+	}
+	var st drainState
+	if err := json.Unmarshal([]byte(raw), &st); err != nil || st.ActionID == "" || st.StartedAt.IsZero() {
+		return drainState{}, false
+	}
+	return st, true
+}
+
+const maxBlockedInProgress = 20
+
 type Executor struct {
 	Kube         *kube.Client
 	Now          func() time.Time
 	PollInterval time.Duration // wait between attempts during a drain
+
+	// SelfNamespace and SelfName identify the agent's own pod, which a drain
+	// never evicts. Both empty = unknown.
+	SelfNamespace, SelfName string
 }
 
 func New(k *kube.Client) *Executor {
@@ -41,7 +80,7 @@ func New(k *kube.Client) *Executor {
 
 // Execute runs the action and always returns a result, never an error:
 // a failure is also a result to report to the backend.
-func (e *Executor) Execute(ctx context.Context, a protocol.Action) protocol.Result {
+func (e *Executor) Execute(ctx context.Context, a protocol.Action, progress ProgressFunc) protocol.Result {
 	start := e.Now().UTC()
 	var res protocol.Result
 	switch a.Type {
@@ -52,7 +91,7 @@ func (e *Executor) Execute(ctx context.Context, a protocol.Action) protocol.Resu
 	case protocol.ActionCordon, protocol.ActionUncordon:
 		res = e.setSchedulable(ctx, a, start)
 	case protocol.ActionDrain:
-		res = e.drain(ctx, a, start)
+		res = e.drain(ctx, a, start, progress)
 	default:
 		res = protocol.Result{Status: protocol.StatusRejected, Message: fmt.Sprintf("unknown action type %q", a.Type)}
 	}
@@ -220,17 +259,42 @@ func hasEmptyDir(p kube.Pod) bool {
 	return false
 }
 
+// InProgressDrains returns the drains started and not finished (nodes with
+// AnnotationDrainInProgress), rebuilt as actions to resume. Unreadable
+// annotations are removed and their nodes returned in dropped.
+func (e *Executor) InProgressDrains(ctx context.Context) (actions []protocol.Action, dropped []string, err error) {
+	nodes, err := e.Kube.ListNodes(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, n := range nodes {
+		name := n.Metadata.Name
+		if _, ok := n.Metadata.Annotations[AnnotationDrainInProgress]; !ok {
+			continue
+		}
+		st, ok := readDrainState(n.Metadata.Annotations)
+		if !ok {
+			dropped = append(dropped, name)
+			_, _ = e.Kube.PatchNode(ctx, name, map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: nil}}})
+			continue
+		}
+		actions = append(actions, protocol.Action{ActionID: st.ActionID, Type: protocol.ActionDrain, Params: protocol.Params{
+			Node: name, TimeoutSeconds: st.TimeoutSeconds, DeleteEmptyDirData: st.DeleteEmptyDirData}})
+	}
+	return actions, dropped, nil
+}
+
 // drain follows the logic of "kubectl drain": it skips DaemonSet pods,
-// mirror pods and terminated pods; it stops before cordoning the node if it
-// finds pods that cannot be moved safely.
-func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time) protocol.Result {
+// mirror pods, terminated pods and the agent's own pod; it stops before
+// cordoning the node if it finds pods that cannot be moved safely.
+func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time, progress ProgressFunc) protocol.Result {
 	node := a.Params.Node
 	if node == "" {
 		return e.failed(start, "node parameter is required")
 	}
-	timeout := defaultDrainTimeout
+	total := defaultDrainTimeout
 	if a.Params.TimeoutSeconds > 0 {
-		timeout = time.Duration(a.Params.TimeoutSeconds) * time.Second
+		total = time.Duration(a.Params.TimeoutSeconds) * time.Second
 	}
 	what := "node " + node
 	n, err := e.Kube.GetNode(ctx, node)
@@ -240,6 +304,15 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 	if r, ok := previousResult(n.Metadata.Annotations, a.ActionID); ok {
 		return r
 	}
+	// This action's drain already started before an agent restart: resume
+	// it with the time left.
+	left := total
+	st, resumed := readDrainState(n.Metadata.Annotations)
+	resumed = resumed && st.ActionID == a.ActionID
+	if resumed {
+		start = st.StartedAt.UTC()
+		left = total - e.Now().Sub(st.StartedAt)
+	}
 	pods, err := e.Kube.ListPodsOnNode(ctx, node)
 	if err != nil {
 		return e.failed(start, "%s", describe(err, "pods on "+what))
@@ -247,6 +320,7 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 
 	var toEvict []kube.Pod
 	var blockers []string
+	var self string
 	skipped := map[string]int{}
 	for _, p := range pods {
 		ref := p.ControllerRef()
@@ -257,6 +331,9 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 			skipped["static"]++
 		case ref != nil && ref.Kind == "DaemonSet":
 			skipped["daemonset"]++
+		case e.isSelf(p):
+			skipped["agent"]++
+			self = podKey(p)
 		case ref == nil:
 			blockers = append(blockers, podKey(p)+" is not managed by a controller and would be lost")
 		case hasEmptyDir(p) && !a.Params.DeleteEmptyDirData:
@@ -265,17 +342,49 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 			toEvict = append(toEvict, p)
 		}
 	}
-	if len(blockers) > 0 {
+	if len(blockers) > 0 && !resumed {
 		r := e.failed(start, "drain aborted before cordoning, the node was not changed: %s", strings.Join(blockers, "; "))
 		r.Details = map[string]any{"blocking_pods": blockers}
 		return r
 	}
-
-	if _, err := e.Kube.PatchNode(ctx, node, map[string]any{"spec": map[string]any{"unschedulable": true}}); err != nil {
-		return e.failed(start, "%s", describe(err, what))
+	if len(blockers) > 0 {
+		r := e.failed(start, "drain of %s stopped: %s; the node stays cordoned", node, strings.Join(blockers, "; "))
+		r.Details = map[string]any{"blocking_pods": blockers}
+		return e.finishDrain(ctx, a, node, r)
 	}
 
-	dctx, cancel := context.WithTimeout(ctx, timeout)
+	if !resumed {
+		state, _ := json.Marshal(drainState{ActionID: a.ActionID, StartedAt: start, TimeoutSeconds: int(total / time.Second),
+			DeleteEmptyDirData: a.Params.DeleteEmptyDirData})
+		patch := map[string]any{
+			"spec":     map[string]any{"unschedulable": true},
+			"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: string(state)}},
+		}
+		if _, err := e.Kube.PatchNode(ctx, node, patch); err != nil {
+			return e.failed(start, "%s", describe(err, what))
+		}
+	}
+	report := func(evicted, remaining int, blocked []kube.Pod) {
+		if progress == nil {
+			return
+		}
+		list := make([]map[string]string, 0, min(len(blocked), maxBlockedInProgress))
+		for _, p := range blocked[:min(len(blocked), maxBlockedInProgress)] {
+			list = append(list, map[string]string{"pod": podKey(p), "reason": "PodDisruptionBudget"})
+		}
+		msg := fmt.Sprintf("draining %s: %d pods evicted, %d remaining", node, evicted, remaining)
+		if len(blocked) > 0 {
+			msg += fmt.Sprintf(", %d blocked by a PodDisruptionBudget", len(blocked))
+		}
+		progress(protocol.Progress{UpdatedAt: e.Now().UTC(), Message: msg,
+			Details: map[string]any{"evicted": evicted, "remaining": remaining, "blocked": list}})
+	}
+	report(0, len(toEvict), nil)
+	if left <= 0 {
+		return e.finishDrain(ctx, a, node, e.drainTimeout(start, node, total, toEvict))
+	}
+
+	dctx, cancel := context.WithTimeout(ctx, left)
 	defer cancel()
 
 	// Eviction in rounds: a pod blocked by a PodDisruptionBudget does not
@@ -290,14 +399,15 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 			case kube.IsTooManyRequests(err):
 				blocked = append(blocked, p)
 			case dctx.Err() != nil:
-				return e.drainTimeout(start, node, timeout, append(blocked, p))
+				return e.finishDrain(ctx, a, node, e.drainTimeout(start, node, total, append(blocked, p)))
 			default:
-				return e.failed(start, "eviction of %s failed: %s; node %s stays cordoned", podKey(p), describe(err, "pod "+podKey(p)), node)
+				return e.finishDrain(ctx, a, node, e.failed(start, "eviction of %s failed: %s; node %s stays cordoned", podKey(p), describe(err, "pod "+podKey(p)), node))
 			}
 		}
 		pending = blocked
+		report(len(toEvict)-len(pending), len(pending), pending)
 		if len(pending) > 0 && !sleep(dctx, e.PollInterval) {
-			return e.drainTimeout(start, node, timeout, pending)
+			return e.finishDrain(ctx, a, node, e.drainTimeout(start, node, total, pending))
 		}
 	}
 
@@ -314,14 +424,15 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 			case err == nil:
 				still = append(still, p)
 			case dctx.Err() != nil:
-				return e.drainTimeout(start, node, timeout, append(still, p))
+				return e.finishDrain(ctx, a, node, e.drainTimeout(start, node, total, append(still, p)))
 			default:
 				still = append(still, p)
 			}
 		}
 		remaining = still
+		report(len(toEvict)-len(remaining), len(remaining), nil)
 		if len(remaining) > 0 && !sleep(dctx, e.PollInterval) {
-			return e.drainTimeout(start, node, timeout, remaining)
+			return e.finishDrain(ctx, a, node, e.drainTimeout(start, node, total, remaining))
 		}
 	}
 
@@ -330,16 +441,47 @@ func (e *Executor) drain(ctx context.Context, a protocol.Action, start time.Time
 		evicted = append(evicted, podKey(p))
 	}
 	sort.Strings(evicted)
-	res := e.succeeded(start, map[string]any{"evicted_pods": evicted, "skipped_pods": skipped},
-		"node %s drained: %d pods evicted, %d skipped (DaemonSet, static or terminated)",
+	details := map[string]any{"evicted_pods": evicted, "skipped_pods": skipped}
+	msg := fmt.Sprintf("node %s drained: %d pods evicted, %d skipped (DaemonSet, static or terminated)",
 		node, len(evicted), skipped["daemonset"]+skipped["static"]+skipped["terminated"])
-	patch := map[string]any{"metadata": map[string]any{"annotations": resultAnnotations(a.ActionID, res)}}
-	if _, err := e.Kube.PatchNode(ctx, node, patch); err != nil {
-		// The drain succeeded: if only the annotation is missing, a new delivery
-		// will repeat a drain with no effect, so the result stays successful.
-		res.Details["annotation_error"] = describe(err, what)
+	if self != "" {
+		details["agent_pod_left"] = self
+		msg += fmt.Sprintf("; the agent's own pod %s stays until the agent restarts (the node is cordoned)", self)
+	}
+	res := e.succeeded(start, details, "%s", msg)
+	return e.finishDrain(ctx, a, node, res)
+}
+
+// finishDrain is the single exit after the cordon. If the backend no longer
+// tracks the action (ErrActionGone) it removes the in-progress annotation
+// and nothing else; if the agent is shutting down it keeps it, so the drain
+// is resumed; otherwise it removes it and writes the result annotations in
+// one patch.
+func (e *Executor) finishDrain(ctx context.Context, a protocol.Action, node string, res protocol.Result) protocol.Result {
+	if ctx.Err() != nil {
+		cause := context.Cause(ctx)
+		res = e.failed(res.StartedAt, "drain of %s stopped: %v; the node stays cordoned", node, cause)
+		if errors.Is(cause, ErrActionGone) {
+			_, _ = e.Kube.PatchNode(context.WithoutCancel(ctx), node, map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationDrainInProgress: nil}}})
+		}
+		return res
+	}
+	ann := resultAnnotations(a.ActionID, res)
+	ann[AnnotationDrainInProgress] = nil
+	if _, err := e.Kube.PatchNode(ctx, node, map[string]any{"metadata": map[string]any{"annotations": ann}}); err != nil {
+		// The drain itself is done: if only the annotation is missing, a new
+		// delivery repeats a drain with no effect, so the result stands.
+		if res.Details == nil {
+			res.Details = map[string]any{}
+		}
+		res.Details["annotation_error"] = describe(err, "node "+node)
 	}
 	return res
+}
+
+func (e *Executor) isSelf(p kube.Pod) bool {
+	return e.SelfName != "" && e.SelfNamespace != "" &&
+		p.Metadata.Name == e.SelfName && p.Metadata.Namespace == e.SelfNamespace
 }
 
 func (e *Executor) drainTimeout(start time.Time, node string, timeout time.Duration, pods []kube.Pod) protocol.Result {

@@ -273,7 +273,7 @@ func (a *Agent) handle(ctx context.Context, act protocol.Action) {
 		log.Info("running action", "params", act.Params, "requested_by", act.RequestedBy)
 		a.cfg.Metrics.ActionRunning(true)
 		start := time.Now()
-		res = a.exec.Execute(ctx, act)
+		res = a.exec.Execute(ctx, act, nil)
 		a.cfg.Metrics.ObserveActionDuration(act.Type, time.Since(start))
 		a.cfg.Metrics.ActionRunning(false)
 		a.cfg.Metrics.ActionOutcome(act.Type, res.Status)
