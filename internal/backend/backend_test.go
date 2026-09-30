@@ -223,3 +223,35 @@ func scrape(t *testing.T, m *metrics.Metrics) string {
 	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	return rec.Body.String()
 }
+
+func TestSendProgress(t *testing.T) {
+	mb, srv, roots := startTLS(t)
+	m := metrics.New("test")
+	holder := &identity.Holder{}
+	c := backend.New(backend.Options{BaseURL: srv.URL, TLS: holder.ClientTLS(roots), Metrics: m})
+	e := &enroll.Enroller{Backend: c, Store: identity.FileStore{Dir: t.TempDir()}, Holder: holder}
+	if _, err := e.Start(context.Background(), "bootstrap-test-token", func(context.Context) (protocol.RegisterRequest, error) { return info, nil }); err != nil {
+		t.Fatal(err)
+	}
+	mb.EnqueueClaimed(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain})
+	p := protocol.Progress{UpdatedAt: time.Now().UTC(), Message: "draining worker-1: 1 pods evicted, 1 remaining",
+		Details: map[string]any{"evicted": 1, "remaining": 1}}
+	if err := c.SendProgress(context.Background(), "d1", p); err != nil {
+		t.Fatal(err)
+	}
+	if last, n := mb.Progress("d1"); n != 1 || last.Message != p.Message {
+		t.Fatalf("progress received: %d %+v", n, last)
+	}
+	if err := c.SendProgress(context.Background(), "unknown", p); backend.Code(err) != http.StatusNotFound {
+		t.Fatalf("unknown action: %v", err)
+	}
+	body := scrape(t, m)
+	for _, line := range []string{
+		`thumbops_agent_backend_requests_total{code="200",operation="progress"} 1`,
+		`thumbops_agent_backend_requests_total{code="404",operation="progress"} 1`,
+	} {
+		if !strings.Contains(body, line) {
+			t.Errorf("missing %s", line)
+		}
+	}
+}

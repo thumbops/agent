@@ -32,6 +32,10 @@ const (
 type entry struct {
 	action protocol.Action
 	state  string
+
+	leaseUntil    time.Time // a claimed action expires after this without a result
+	progress      protocol.Progress
+	progressCount int
 }
 
 type Server struct {
@@ -53,6 +57,7 @@ type Server struct {
 	ClaimOverride  map[string]int // action_id → HTTP status to return on claim
 	PollStatus     int            // if not 0, polling responds with this status
 	ResultFailures int            // how many times to respond 503 when the result is sent
+	ClaimLease     time.Duration  // lease of a claimed action, renewed by progress
 	BootstrapToken string
 	RequireMTLS    bool // requires a valid client certificate on /v1/agent/*
 	CertLifetime   time.Duration
@@ -95,6 +100,7 @@ func New() *Server {
 		usedTokens:     map[string]bool{},
 		BootstrapToken: "bootstrap-test-token",
 		CertLifetime:   30 * 24 * time.Hour,
+		ClaimLease:     5 * time.Minute,
 		clusterID:      "8c1f0e7a-0000-4000-8000-00000000c1a5",
 		caCert:         ca,
 		caKey:          key,
@@ -130,6 +136,80 @@ func (s *Server) Enqueue(a protocol.Action) {
 	s.byID[a.ActionID] = e
 	close(s.notify)
 	s.notify = make(chan struct{})
+}
+
+// expireLeases marks as expired the claimed actions whose lease is over.
+// Call it with s.mu held.
+func (s *Server) expireLeases() {
+	now := time.Now()
+	for _, e := range s.entries {
+		if e.state == stateClaimed && !e.leaseUntil.IsZero() && now.After(e.leaseUntil) {
+			e.state = stateExpired
+		}
+	}
+}
+
+// EnqueueClaimed adds an action already claimed, as if the agent had claimed
+// it before a restart.
+func (s *Server) EnqueueClaimed(a protocol.Action) {
+	s.Enqueue(a)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.byID[a.ActionID]
+	e.state = stateClaimed
+	e.leaseUntil = time.Now().Add(s.ClaimLease)
+}
+
+// Cancel cancels an action that is approved or claimed (the next progress
+// gets 410).
+func (s *Server) Cancel(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.byID[id]; ok && (e.state == stateApproved || e.state == stateClaimed) {
+		e.state = stateCancelled
+	}
+}
+
+// Progress returns the last progress of an action and how many were received.
+func (s *Server) Progress(id string) (protocol.Progress, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.byID[id]
+	if !ok {
+		return protocol.Progress{}, 0
+	}
+	return e.progress, e.progressCount
+}
+
+func (s *Server) progressHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var p protocol.Progress
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLeases()
+	e, ok := s.byID[id]
+	switch {
+	case !ok:
+		http.Error(w, "unknown action", http.StatusNotFound)
+	case e.state == stateClaimed:
+		e.progress = p
+		e.progressCount++
+		e.leaseUntil = time.Now().Add(s.ClaimLease)
+		w.WriteHeader(http.StatusOK)
+	case e.state == stateExpired || e.state == stateCancelled:
+		http.Error(w, "action expired or cancelled", http.StatusGone)
+	default:
+		http.Error(w, "action not claimed", http.StatusConflict)
+	}
+}
+
+func (s *Server) debugCancel(w http.ResponseWriter, r *http.Request) {
+	s.Cancel(r.PathValue("id"))
+	w.WriteHeader(http.StatusOK)
 }
 
 // SetPollStatus changes the polling response even while the server is in use
@@ -235,8 +315,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent/actions", s.poll)
 	mux.HandleFunc("POST /v1/agent/actions/{id}/claim", s.claim)
 	mux.HandleFunc("POST /v1/agent/actions/{id}/result", s.result)
+	mux.HandleFunc("POST /v1/agent/actions/{id}/progress", s.progressHandler)
 	mux.HandleFunc("POST /debug/actions", s.debugEnqueue)
 	mux.HandleFunc("GET /debug/actions", s.debugList)
+	mux.HandleFunc("POST /debug/actions/{id}/cancel", s.debugCancel)
 	mux.HandleFunc("POST /debug/bootstrap-tokens", s.debugAddToken)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.RequireMTLS && strings.HasPrefix(r.URL.Path, "/v1/agent/") {
@@ -419,6 +501,7 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLeases()
 	e, ok := s.byID[id]
 	if !ok {
 		http.Error(w, "unknown action", http.StatusNotFound)
@@ -435,6 +518,7 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "action expired", http.StatusGone)
 	case e.state == stateApproved:
 		e.state = stateClaimed
+		e.leaseUntil = time.Now().Add(s.ClaimLease)
 		w.WriteHeader(http.StatusOK)
 	case e.state == stateExpired || e.state == stateCancelled:
 		http.Error(w, "action expired or canceled", http.StatusGone)
@@ -457,7 +541,12 @@ func (s *Server) result(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "backend temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	s.expireLeases()
 	e, ok := s.byID[id]
+	if ok && (e.state == stateExpired || e.state == stateCancelled) {
+		http.Error(w, "action expired or cancelled", http.StatusGone)
+		return
+	}
 	if !ok || e.state != stateClaimed {
 		http.Error(w, "action not claimed", http.StatusConflict)
 		return
@@ -495,16 +584,24 @@ func (s *Server) debugAddToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) debugList(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLeases()
 	type row struct {
-		Action protocol.Action  `json:"action"`
-		State  string           `json:"state"`
-		Result *protocol.Result `json:"result,omitempty"`
+		Action        protocol.Action    `json:"action"`
+		State         string             `json:"state"`
+		Result        *protocol.Result   `json:"result,omitempty"`
+		Progress      *protocol.Progress `json:"progress,omitempty"`
+		ProgressCount int                `json:"progress_count,omitempty"`
 	}
 	out := []row{}
 	for _, e := range s.entries {
 		rw := row{Action: e.action, State: e.state}
 		if res, ok := s.results[e.action.ActionID]; ok {
 			rw.Result = &res
+		}
+		if e.progressCount > 0 {
+			p := e.progress
+			rw.Progress = &p
+			rw.ProgressCount = e.progressCount
 		}
 		out = append(out, rw)
 	}

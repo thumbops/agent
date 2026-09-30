@@ -201,6 +201,17 @@ func (c *Client) SendResult(ctx context.Context, actionID string, res protocol.R
 	return err
 }
 
+// progressTimeout is short: progress is never retried and must not hold up
+// the action it reports on.
+const progressTimeout = 10 * time.Second
+
+// SendProgress reports the progress of a claimed long action. It is never
+// retried: the next progress is newer.
+func (c *Client) SendProgress(ctx context.Context, actionID string, p protocol.Progress) error {
+	_, err := c.do(ctx, metrics.OpProgress, http.MethodPost, "/v1/agent/actions/"+url.PathEscape(actionID)+"/progress", "", progressTimeout, p, nil)
+	return err
+}
+
 // PutStatus sends the cluster status summary; the backend keeps only the latest.
 func (c *Client) PutStatus(ctx context.Context, s protocol.ClusterStatus) error {
 	_, err := c.do(ctx, metrics.OpStatus, http.MethodPut, "/v1/agent/status", "", defaultTimeout, s, nil)

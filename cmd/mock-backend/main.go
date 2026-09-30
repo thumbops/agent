@@ -6,6 +6,7 @@
 //	go run ./cmd/mock-backend -addr :8080
 //	curl -X POST localhost:8080/debug/actions -d '{"type":"scale","params":{"namespace":"demo","deployment":"web","replicas":3}}'
 //	curl localhost:8080/debug/actions
+//	curl -X POST localhost:8080/debug/actions/<id>/cancel
 //
 // With -tls-cert and -tls-key it serves HTTPS like the real backend:
 // registration with a single-use bootstrap token, mTLS required on

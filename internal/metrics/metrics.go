@@ -33,6 +33,7 @@ const (
 	OpClaim     = "claim"
 	OpResult    = "result"
 	OpStatus    = "status"
+	OpProgress  = "progress"
 )
 
 var outcomes = []string{protocol.StatusSucceeded, protocol.StatusFailed, protocol.StatusRejected, OutcomeExpired, OutcomeDiscarded}
