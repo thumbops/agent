@@ -621,4 +621,33 @@ func TestInterruptedDrainIsResumedAtStartup(t *testing.T) {
 	if e.fk.PodExists("payments", "api-1") {
 		t.Fatal("the resumed drain must evict the pod")
 	}
+	if n := e.mb.Claims("d1"); n != 0 {
+		t.Fatalf("the resume must not claim the action, got %d claim calls", n)
+	}
+}
+
+func TestInterruptedDrainOfAnActionTheBackendNoLongerTracks(t *testing.T) {
+	e := newEnv(t, nil, func(c *Config) { c.ProgressMinGap = time.Millisecond })
+	e.fk.AddPod(podOn("payments", "api-1", "worker-1"))
+	state, _ := json.Marshal(map[string]any{"action_id": "d1", "started_at": time.Now().Add(-time.Second).UTC(), "timeout_seconds": 30})
+	e.fk.PatchNodeForTest("worker-1", map[string]any{"spec": map[string]any{"unschedulable": true},
+		"metadata": map[string]any{"annotations": map[string]any{actions.AnnotationDrainInProgress: string(state)}}})
+	e.mb.EnqueueClaimed(protocol.Action{ActionID: "d1", Type: protocol.ActionDrain, Params: protocol.Params{Node: "worker-1", TimeoutSeconds: 30}})
+	e.mb.Cancel("d1")
+
+	stop := e.run(t)
+	defer stop()
+	waitUntil(t, func() bool {
+		_, ok := e.fk.Node("worker-1").Metadata.Annotations[actions.AnnotationDrainInProgress]
+		return !ok
+	})
+	if n := len(e.fk.Evictions()); n != 0 {
+		t.Fatalf("no pod may be evicted for an action the backend no longer tracks, got %d", n)
+	}
+	if _, ok := e.mb.Result("d1"); ok {
+		t.Fatal("no result must be sent for a cancelled action")
+	}
+	if !e.fk.Node("worker-1").Spec.Unschedulable {
+		t.Fatal("the node must stay cordoned")
+	}
 }

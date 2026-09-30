@@ -21,7 +21,7 @@ const namespace = "thumbops_agent"
 // (protocol.StatusSucceeded, StatusFailed, StatusRejected).
 const (
 	OutcomeExpired   = "expired"   // received after its deadline, not claimed
-	OutcomeDiscarded = "discarded" // claim answered 409 or 410
+	OutcomeDiscarded = "discarded" // claim answered 409 or 410, or the backend stopped the action (409/410 on progress)
 )
 
 // Backend operations, the operation label of thumbops_agent_backend_requests_total.

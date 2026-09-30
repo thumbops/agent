@@ -44,8 +44,10 @@ grep -q 'helm.sh/resource-policy: keep' <<<"$identity" || fail "identity Secret 
 grep -A4 '"denied_namespaces"' "$out/defaults.yaml" | grep -q '"thumbops"' || fail "release namespace not denied"
 # Other namespaces are also denied: the helper adds the release namespace.
 grep -A4 '"denied_namespaces"' "$out/other-ns.yaml" | grep -q '"other"' || fail "release namespace 'other' not denied"
-# Without the status RBAC the status is turned off.
+# The agent knows its own pod (downward API).
 grep -q 'fieldPath: metadata.name' "$out/defaults.yaml" || fail "POD_NAME downward API missing"
+grep -q 'fieldPath: metadata.namespace' "$out/defaults.yaml" || fail "POD_NAMESPACE downward API missing"
+# Without the status RBAC the status is turned off.
 grep -q -- '--status=false' "$out/no-rbac.yaml" || fail "--status=false missing"
 ! grep -q 'name: thumbops-agent-status' "$out/no-rbac.yaml" || fail "status ClusterRole rendered"
 ! grep -q 'name: thumbops-agent-actions' "$out/no-rbac.yaml" || fail "actions ClusterRole rendered"

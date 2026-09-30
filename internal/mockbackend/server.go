@@ -45,6 +45,7 @@ type Server struct {
 	results map[string]protocol.Result
 	notify  chan struct{}
 
+	claims     map[string]int // claim calls per action
 	heartbeats []protocol.HeartbeatRequest
 	statuses   []protocol.ClusterStatus
 	// statusRequested is returned once in the next poll response.
@@ -250,6 +251,13 @@ func (s *Server) WaitResult(id string, timeout time.Duration) (protocol.Result, 
 		time.Sleep(10 * time.Millisecond)
 	}
 	return protocol.Result{}, false
+}
+
+// Claims returns how many claim calls the action received.
+func (s *Server) Claims(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.claims[id]
 }
 
 func (s *Server) State(id string) string {
@@ -508,6 +516,10 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireLeases()
+	if s.claims == nil {
+		s.claims = map[string]int{}
+	}
+	s.claims[id]++
 	e, ok := s.byID[id]
 	if !ok {
 		http.Error(w, "unknown action", http.StatusNotFound)
