@@ -13,6 +13,12 @@ model, plans, brand) into this repository.
 Never run the agent or kubectl experiments against real clusters without an
 explicit request from the user: use kind or the fake API.
 
+Never touch the user's `~/.kube/config` or current kubectl context: they use
+kubectl for other work at the same time. Every kind, kubectl or helm command
+for tests runs with `KUBECONFIG` exported to a dedicated file (in this
+repository `.kind-kubeconfig`, git-ignored; `test/e2e/run.sh` refuses to run
+without it outside CI). Never run `kubectl config use-context`.
+
 Everything written into the repository is in English: code comments, docs,
 log and error messages, action result messages, tests, commit messages and PR
 descriptions.
@@ -25,7 +31,7 @@ go vet ./...
 gofmt -l .              # must print nothing
 test/chart/check.sh     # chart lint, render, kubeconform, manifest up to date
 hack/gen-manifest.sh    # regenerate deploy/agent.yaml after a chart change
-test/e2e/run.sh         # end-to-end on kind (cluster from test/e2e/kind.yaml)
+test/e2e/run.sh         # end-to-end on kind (cluster from test/e2e/kind.yaml, KUBECONFIG=.kind-kubeconfig)
 go run ./cmd/mock-backend -addr 127.0.0.1:8080
 go run ./cmd/thumbops-agent --dev-insecure --backend-url http://127.0.0.1:8080 --kube-api http://127.0.0.1:8001 --policy-file /tmp/policy.json
 ```

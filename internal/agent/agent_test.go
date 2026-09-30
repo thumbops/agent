@@ -500,7 +500,10 @@ func TestHeartbeatMetricsAndHealth(t *testing.T) {
 	}
 	stop := e.run(t)
 	deadline := time.Now().Add(5 * time.Second)
-	for body := scrape(t, m); !strings.Contains(body, "thumbops_agent_heartbeat_only 1") || strings.Contains(body, "thumbops_agent_heartbeat_last_success_timestamp_seconds 0\n"); body = scrape(t, m) {
+	// Read the samples, not substrings: the HELP line of heartbeat_only
+	// starts with "1 after a 426" and would match "heartbeat_only 1".
+	for body := scrape(t, m); value(t, body, "thumbops_agent_heartbeat_only") != 1 ||
+		value(t, body, "thumbops_agent_heartbeat_last_success_timestamp_seconds") == 0; body = scrape(t, m) {
 		if time.Now().After(deadline) {
 			stop()
 			t.Fatal("heartbeat_only never became 1")
