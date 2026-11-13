@@ -86,7 +86,9 @@ Each one is covered by tests; if a change makes them fail, stop and understand w
   that applies the change. If the ID is already there, resend the saved result.
 - **Policy default deny.** Without a policy file everything is rejected;
   unknown fields in the policy are a startup error. Control plane nodes are
-  protected unless `allow_control_plane_nodes`.
+  protected unless `allow_control_plane_nodes`; a node that cannot be read
+  for that check is not acted on (`failed` result), only a `404` is left to
+  the executor.
 - **Safe drain.** Stop *before* cordoning if there are pods without a
   controller or with `emptyDir` (without consent); use the Eviction API
   (honors PDBs); skip DaemonSet, static and terminated pods; on timeout the

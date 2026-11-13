@@ -186,6 +186,38 @@ func TestControlPlaneNodeProtected(t *testing.T) {
 	}
 }
 
+// The node cannot be read when the policy is checked, but can a moment
+// later: the action must not run without the control plane check.
+func TestUnreadableNodeIsNotActedOn(t *testing.T) {
+	e := newEnv(t, nil)
+	e.fk.AddNode("master-1", true, map[string]string{"node-role.kubernetes.io/control-plane": ""})
+	stop := e.run(t)
+	defer stop()
+
+	e.fk.FailGetNode("master-1", 1)
+	e.mb.Enqueue(protocol.Action{ActionID: "c1", Type: protocol.ActionCordon, Params: protocol.Params{Node: "master-1"}})
+	res, ok := e.mb.WaitResult("c1", 5*time.Second)
+	if !ok || res.Status != protocol.StatusFailed || !strings.Contains(res.Message, "local policy") {
+		t.Fatalf("expected a failed result naming the policy check: %+v %v", res, ok)
+	}
+	if e.fk.Node("master-1").Spec.Unschedulable || len(e.fk.Patches()) != 0 {
+		t.Fatalf("the node must not be touched, patches: %v", e.fk.Patches())
+	}
+}
+
+// A node that does not exist is reported by the executor, not by the policy.
+func TestMissingNodeIsReportedAsNotFound(t *testing.T) {
+	e := newEnv(t, nil)
+	stop := e.run(t)
+	defer stop()
+
+	e.mb.Enqueue(protocol.Action{ActionID: "c2", Type: protocol.ActionCordon, Params: protocol.Params{Node: "ghost"}})
+	res, ok := e.mb.WaitResult("c2", 5*time.Second)
+	if !ok || res.Status != protocol.StatusFailed || !strings.Contains(res.Message, "not found") {
+		t.Fatalf("expected a failed result for a missing node: %+v %v", res, ok)
+	}
+}
+
 func TestExpiredActionIsNotClaimed(t *testing.T) {
 	e := newEnv(t, nil)
 	// The agent receives an action that has already expired (e.g. delivered late).

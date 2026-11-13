@@ -275,9 +275,12 @@ func (a *Agent) handle(ctx context.Context, act protocol.Action) {
 	}
 
 	var res protocol.Result
-	if err := a.checkPolicy(ctx, act); err != nil {
+	if err := a.checkPolicy(ctx, act); isViolation(err) {
 		log.Warn("action rejected by the local policy", "reason", err)
 		res = a.rejected(act, err)
+	} else if err != nil {
+		log.Error("action not run: the local policy could not be checked", "err", err)
+		res = a.unchecked(act, err)
 	} else {
 		var send bool
 		if res, send = a.execute(ctx, act, log, false); !send {
@@ -297,6 +300,20 @@ func (a *Agent) rejected(act protocol.Action, reason error) protocol.Result {
 	now := a.cfg.Now().UTC()
 	a.cfg.Metrics.ActionOutcome(act.Type, protocol.StatusRejected)
 	return protocol.Result{Status: protocol.StatusRejected, StartedAt: now, FinishedAt: now, Message: reason.Error()}
+}
+
+// unchecked builds the result of an action that was not run because the
+// local policy could not be checked (the node could not be read): the
+// cluster is not changed.
+func (a *Agent) unchecked(act protocol.Action, cause error) protocol.Result {
+	now := a.cfg.Now().UTC()
+	a.cfg.Metrics.ActionOutcome(act.Type, protocol.StatusFailed)
+	return protocol.Result{Status: protocol.StatusFailed, StartedAt: now, FinishedAt: now, Message: cause.Error()}
+}
+
+func isViolation(err error) bool {
+	var v *policy.Violation
+	return errors.As(err, &v)
 }
 
 // execute runs an action with a progress reporter. send is false when no
@@ -352,12 +369,16 @@ func (a *Agent) resumeDrains(ctx context.Context) {
 		}
 		log := a.log.With("action_id", act.ActionID, "type", act.Type)
 		var res protocol.Result
-		if err := a.checkPolicy(ctx, act); err != nil {
+		if err := a.checkPolicy(ctx, act); isViolation(err) {
 			log.Warn("interrupted drain rejected by the local policy", "node", act.Params.Node, "reason", err)
 			if aerr := a.exec.AbandonDrain(ctx, act.Params.Node); aerr != nil {
 				log.Error("cannot remove the drain-in-progress annotation", "node", act.Params.Node, "err", aerr)
 			}
 			res = a.rejected(act, err)
+		} else if err != nil {
+			// Not a rejection: the annotation is kept and the node is left as it is.
+			log.Error("interrupted drain not resumed: the local policy could not be checked", "node", act.Params.Node, "err", err)
+			res = a.unchecked(act, err)
 		} else {
 			log.Info("resuming an interrupted drain", "node", act.Params.Node)
 			var send bool
@@ -372,14 +393,22 @@ func (a *Agent) resumeDrains(ctx context.Context) {
 	}
 }
 
+// checkPolicy returns a *policy.Violation when the local policy rejects the
+// action, and any other error when the policy could not be checked: the
+// action must not run in either case.
 func (a *Agent) checkPolicy(ctx context.Context, act protocol.Action) error {
 	if err := a.policy.Check(act); err != nil {
 		return err
 	}
 	if protocol.IsNodeAction(act.Type) {
 		n, err := a.kube.GetNode(ctx, act.Params.Node)
+		if kube.IsNotFound(err) {
+			return nil // there is no node to protect: the executor reports it
+		}
 		if err != nil {
-			return nil // a missing or unreadable node is reported by the executor
+			// Fail closed: the executor reads the node again, and if that
+			// read succeeded the control plane check would be skipped.
+			return fmt.Errorf("cannot read node %s to check it against the local policy, the node was not changed: %w", act.Params.Node, err)
 		}
 		return a.policy.CheckNode(n.Metadata.Name, n.Metadata.Labels)
 	}
