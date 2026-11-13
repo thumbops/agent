@@ -1,16 +1,16 @@
-# ThumbOps agent (prototype)
+# ThumbOps agent
 
 The agent runs in every Kubernetes cluster managed by ThumbOps. It connects
 outbound to the backend, receives the actions approved in the app and runs
 them, within the limits of the cluster's local policy.
 
-The prototype implements protocol v1, described in `protocol/protocol.md` in
+It implements protocol v1, described in `protocol/protocol.md` in
 the `thumbops/spec` repository: registration with a bootstrap token and mTLS,
 heartbeat, long polling, claim, result reporting and certificate renewal.
 There are five actions: `rollout-restart`, `scale`, `cordon`, `uncordon`,
 `drain`.
 
-## Prototype choices
+## Design choices
 
 - **Actions on the Kubernetes REST API, status with client-go.** The actions
   talk directly to the REST API (merge patch, Eviction API,
@@ -51,7 +51,8 @@ There are five actions: `rollout-restart`, `scale`, `cordon`, `uncordon`,
   evictions, leaves the node cordoned and sends no result.
 - **Local policy in JSON** (ConfigMap). Without a file the policy denies
   everything. Besides action types, namespaces and a replica maximum, it
-  protects control plane nodes by default.
+  protects control plane nodes by default; a node that cannot be read for
+  that check is not acted on.
 - **Certificate rotation without a restart.** The client certificate is
   presented only at the TLS handshake: after registration and renewal the
   agent reopens its connections to the backend. (A test covers it: without
