@@ -23,6 +23,7 @@ type Server struct {
 	namespaces  map[string]string // name → UID
 	denied      map[string]bool   // e.g. "patch apps/deployments"
 	evictBlocks map[string]int    // "ns/pod" → how many 429s to return; -1 = always
+	nodeErrors  map[string]int    // node → how many 500s to return on get
 	patches     []string
 	evictions   []string
 	version     string
@@ -37,6 +38,7 @@ func New() *Server {
 		namespaces:  map[string]string{"kube-system": "b3b0c1c2-0000-4000-8000-000000000001"},
 		denied:      map[string]bool{},
 		evictBlocks: map[string]int{},
+		nodeErrors:  map[string]int{},
 		version:     "v1.34.3",
 	}
 	mux := http.NewServeMux()
@@ -113,6 +115,14 @@ func (s *Server) BlockEviction(ns, pod string, n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.evictBlocks[ns+"/"+pod] = n
+}
+
+// FailGetNode simulates a transient API error: the next n gets of the node
+// respond 500.
+func (s *Server) FailGetNode(name string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nodeErrors[name] = n
 }
 
 // --- state inspection ---
@@ -208,6 +218,11 @@ func (s *Server) getNode(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.allowed(w, "get", "", "nodes", "") {
+		return
+	}
+	if left := s.nodeErrors[r.PathValue("name")]; left > 0 {
+		s.nodeErrors[r.PathValue("name")] = left - 1
+		writeStatus(w, http.StatusInternalServerError, "InternalError", "transient error")
 		return
 	}
 	n, ok := s.nodes[r.PathValue("name")]
